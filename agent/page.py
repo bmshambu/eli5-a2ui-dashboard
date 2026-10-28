@@ -8,6 +8,7 @@ Chips post {type:'a2ui_action'} to the parent; GE delivers them to the agent lik
 """
 import html
 import json
+import re
 
 from . import charts, explorer
 from .analysis import STYLES, Analysis, available
@@ -110,6 +111,17 @@ border-radius:10px;padding:10px 14px;margin:-4px 0 16px;font-size:14px;color:var
 .badge{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--ink2);background:var(--chip);border-radius:999px;padding:3px 10px;margin-top:6px}
 #tip{position:fixed;pointer-events:none;z-index:9;background:var(--ink);color:var(--surface);font-size:12px;padding:6px 9px;border-radius:6px;max-width:320px;box-shadow:0 4px 14px rgba(0,0,0,.25)}
 .fade{animation:fade .5s ease-out both}@keyframes fade{from{opacity:0;transform:translateY(6px)}}
+.dash .wrap,.wrap.dash{max-width:1320px;padding:12px 14px 30px}
+.dh{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:10px}.dh>div:first-child{flex:1;min-width:240px}
+.dh h1{font-size:20px;margin:2px 0 0}.dh-r{display:flex;gap:8px;align-items:center}.dh-r .theme{float:none;margin:0}
+details.more{position:relative}details.more summary{list-style:none;cursor:pointer;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:3px 12px;font-size:12.5px;color:var(--ink)}
+details.more summary::-webkit-details-marker{display:none}details.more summary::after{content:" ▾";color:var(--muted)}
+details.more .menu{right:0;left:auto;display:flex;flex-direction:column;gap:4px;align-items:stretch}details.more .menu .chip{text-align:left;border-radius:8px}
+.brief .bh{font:600 10.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.brief .bt{font-weight:700;font-size:14px;line-height:1.35;margin:0 0 6px}.brief ul{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.45}
+.brief li{padding:6px 0;border-top:1px solid var(--line)}.brief li b{display:block;font-size:12px;color:var(--ink2)}
+.brief .asks{margin-top:8px}.brief .asks .chip{font-size:12px;padding:4px 10px}
+details.report{margin-top:14px}details.report>summary{cursor:pointer;color:var(--accent);font-size:14px;margin-bottom:10px}
 @media (prefers-reduced-motion:reduce){.pbar,.fade{animation:none}}
 @media (max-width:560px){h1{font-size:21px}.prow{grid-template-columns:minmax(70px,30%) 1fr 58px}.pcum{display:none}}
 """
@@ -197,7 +209,59 @@ def _table(t: dict) -> str:
             f'<table class="tbl"><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table></div></details>')
 
 
+def _brief(a: Analysis, n: Narrative, base: dict) -> str:
+    """The AI summary for the dashboard's side panel: headline, the insights, questions to ask."""
+    items = "".join(f"<li><b>{_e(i.title)}</b>{_e(i.text)}</li>" for i in n.insights[:4])
+    asks = "".join(_button(q, ASK_ACTION, {**base, "prompt": q}) for q in n.questions[:3])
+    return (f'<div class="brief"><div class="bh">AI summary · all data</div><p class="bt">{_e(n.headline)}</p><ul>{items}</ul>'
+            f'{f"<div class=asks>{asks}</div>" if asks else ""}</div>')
+
+
+def dashboard(a: Analysis, n: Narrative, file: str) -> str:
+    """The explorer as the whole page: a slim header, filters, KPIs, the views with the "What this
+    shows" panel and AI summary beside them, and the written report folded away underneath."""
+    base = {"sheet": a.sheet, "style": a.style, "measure": a.measure, "dim": a.dim}
+    others = "".join(_button(STYLES[s][0], CHART_ACTION, {**base, "style": s, "prompt": f"Show {a.sheet} as {STYLES[s][0].lower()}"})
+                     for s, ok in available(a.prof).items() if ok and s not in ("auto", "explore"))
+    more = f'<details class="more"><summary>Other charts</summary><div class="menu">{others}</div></details>' if others else ""
+    actions = "".join(f"<li>{_e(x)}</li>" for x in n.actions)
+    warn = [f.text for f in a.facts if f.kind == "quality" and f.weight >= 2]
+    heads = f'<div class="heads"><b>Heads-up</b><span>{_e(" ".join(warn))}</span></div>' if warn else ""
+    joined = [x for x in a.notes if x.startswith("Added ")]
+    tip = " ".join(joined)
+    tabs = [re.search(r"from the (.+) tab, matched", x).group(1) for x in joined if re.search(r"from the (.+) tab, matched", x)]
+    joined_note = (f'<div class="axisnote" data-tip="{_e(tip)}">Joined {_e(", ".join(tabs))} onto this tab by ID: their columns are filters here.</div>'
+                   if tabs else "")
+    span = f" · {_e(a.prof.span)}" if a.prof.span else ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_e(a.sheet)} dashboard</title><style>{CSS}</style></head><body><div class="wrap dash">
+<header class="dh"><div><div class="eyebrow">{_e(file)} · {_e(a.sheet)} tab · {a.prof.rows:,} rows{span}</div>
+<h1>{_e(a.measure)} dashboard</h1>{joined_note}</div>
+<div class="dh-r">{more}<div class="theme" role="group" aria-label="Theme"><button data-t="auto">Auto</button><button data-t="light">Light</button><button data-t="dark">Dark</button></div></div></header>
+{heads}{explorer.render(a, _brief(a, n, base))}
+<details class="report"><summary>Full report: next steps and how these numbers were made</summary>
+<section class="two"><div class="card"><h2>What to do next</h2><ol>{actions}</ol></div>
+<div class="card"><h2>Summary</h2><p>{_e(n.summary)}</p></div></section>
+{_how(a, n)}</details>
+</div><div id="tip" role="tooltip" hidden></div><script>{JS}</script></body></html>"""
+
+
+def _how(a: Analysis, n: Narrative) -> str:
+    fact_list = "".join(f"<li><code>{_e(f.id)}</code> {_e(f.text)}</li>" for f in a.facts)
+    caveats = "".join(f"<li>{_e(c)}</li>" for c in n.caveats)
+    notes = "".join(f"<li>{_e(x)}</li>" for x in a.notes if x not in n.caveats)
+    agg = "averaged" if a.agg == "mean" else "added up"
+    return f"""<section class="card how"><details><summary>How these numbers were made</summary>
+<p>{_e(a.measure)} values are {agg}{f" by {_e(a.prof.grain)}" if a.prof.time else ""}. Every figure on this page was computed from your sheet in Python;
+the AI only wrote the words around them, and any sentence whose numbers did not match these facts was replaced by the facts themselves.</p>
+{f"<h3>Caveats</h3><ul>{caveats}</ul>" if caveats else ""}{f"<h3>Data notes</h3><ul>{notes}</ul>" if notes else ""}
+<h3>Computed facts</h3><ul>{fact_list}</ul></details>
+<div class="badge">Numbers checked against the sheet · {len(a.facts)} facts</div></section>"""
+
+
 def page(a: Analysis, n: Narrative, file: str) -> str:
+    if a.style == "explore":
+        return dashboard(a, n, file)
     base = {"sheet": a.sheet, "style": a.style, "measure": a.measure, "dim": a.dim}
     styles = "".join(
         _button(STYLES[s][0], CHART_ACTION, {**base, "style": s, "prompt": f"Show {a.sheet} as {STYLES[s][0].lower()}"}, on=s == a.style)
@@ -221,10 +285,6 @@ def page(a: Analysis, n: Narrative, file: str) -> str:
                      f'<h3>{_e(ins.title)}</h3><p>{_e(ins.text)}</p>{f"<div>{ev}</div>" if ev else ""}</article>')
     actions = "".join(f"<li>{_e(x)}</li>" for x in n.actions)
     asks = "".join(_button(q, ASK_ACTION, {**base, "prompt": q}) for q in n.questions)
-    fact_list = "".join(f"<li><code>{_e(f.id)}</code> {_e(f.text)}</li>" for f in a.facts)
-    caveats = "".join(f"<li>{_e(c)}</li>" for c in n.caveats)
-    notes = "".join(f"<li>{_e(x)}</li>" for x in a.notes if x not in n.caveats)
-    agg = "averaged" if a.agg == "mean" else "added up"
     warn = [f.text for f in a.facts if f.kind == "quality" and f.weight >= 2]
     heads = f'<div class="heads"><b>Heads-up</b><span>{_e(" ".join(warn))}</span></div>' if warn else ""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -233,16 +293,11 @@ def page(a: Analysis, n: Narrative, file: str) -> str:
 <div class="eyebrow">{_e(file)} · {_e(a.sheet)} tab · {a.prof.rows:,} rows</div>
 <h1>{_e(n.headline)}</h1><p class="summary">{_e(n.summary)}</p>
 <div class="controls">{controls}</div>
-{"" if a.style == "explore" else f'<section class="kpis">{kpis}</section>'}
+<section class="kpis">{kpis}</section>
 {heads}<section class="card"><h2>{_e(title)}</h2><p class="sub">{_e(sub)}</p>{charts.draw(a)}{_table(a.table)}</section>
 <section class="insights">{"".join(cards)}</section>
 <section class="two"><div class="card"><h2>What to do next</h2><ol>{actions}</ol></div>
 <div class="card"><h2>Ask next</h2><div class="asks">{asks}</div></div></section>
-<section class="card how"><details><summary>How these numbers were made</summary>
-<p>{_e(a.measure)} values are {agg}{f" by {_e(a.prof.grain)}" if a.prof.time else ""}. Every figure on this page was computed from your sheet in Python;
-the AI only wrote the words around them, and any sentence whose numbers did not match these facts was replaced by the facts themselves.</p>
-{f"<h3>Caveats</h3><ul>{caveats}</ul>" if caveats else ""}{f"<h3>Data notes</h3><ul>{notes}</ul>" if notes else ""}
-<h3>Computed facts</h3><ul>{fact_list}</ul></details>
-<div class="badge">Numbers checked against the sheet · {len(a.facts)} facts</div></section>
+{_how(a, n)}
 </div><div id="tip" role="tooltip" hidden></div><script>{JS}</script></body></html>"""
 

@@ -19,6 +19,7 @@ CHART_ACTION = page.CHART_ACTION  # draw sheet/style/measure/dim
 ASK_ACTION = page.ASK_ACTION  # a question about the data
 PDF_ACTION = "pdf"  # the agent builds the PDF and sends it back as a file
 REVIEW_ACTION = "review"  # check the uploaded file and say what to fix
+STYLES_ACTION = "styles"  # the chart-style picker for a tab
 
 
 def _text(cid: str, text: str, hint: str = "body") -> dict:
@@ -58,8 +59,8 @@ def _step(i: int, icon: str, title: str, what: str) -> list[dict]:
 def welcome_card() -> list[dict]:
     steps = [(1, "upload_file", "Attach an Excel or CSV file", "Use the attach button. Any layout: title rows, totals and one column per month are fine."),
              (2, "fact_check", "Check it first (optional)", "Tap Review my file to see what's missing or wrong, cell by cell, before you chart."),
-             (3, "insights", "Pick a tab and a view", "An interactive explorer, trend with forecast, heatmap and more, each with the story "
-                                                    "behind the numbers.")]
+             (3, "insights", "Your dashboard opens", "Filters, bubbles, treemap and heatmap with the insights beside them. Lookup tabs "
+                                                   "(Products, Customers) are joined on automatically; other chart styles are one tap away.")]
     extra = [c for n, icon, t, d in steps for c in _step(n, icon, t, d)]
     children = [_text("title", "Turn a spreadsheet into charts with insights", "h4"), *[c for c in extra if c["id"] in ("step1", "step2", "step3")],
                 {"id": "div", "component": "MaterialDivider"},
@@ -119,17 +120,21 @@ def review_card(file: str, tabs: list) -> list[dict]:
     return a2ui.surface("dash-review", [root, *[c for c in comps if c["id"] in children]])
 
 
-def dashboard_card(a: Analysis, n: Narrative, file: str) -> list[dict]:
-    """Opener card in chat; the insight page opens in the side panel. Download PDF and Pick
-    another tab are native buttons (the frame can't download)."""
+def dashboard_card(a: Analysis, n: Narrative, file: str, hint: str | None = None, tabs: int = 1) -> list[dict]:
+    """Opener card in chat; the dashboard opens in the side panel. Download PDF, Chart styles, Pick
+    another tab and (after an upload with something to fix) Review my file are native buttons."""
     ctx = {**a.meta(), "prompt": f"Download {a.sheet} insights as PDF"}
     comps = [
         {"id": "frame", "component": "IFrameSrcdoc", "htmlContent": page.page(a, n, file), "height": FRAME_HEIGHT},
         _button(PDF_ACTION, "Download PDF", PDF_ACTION, ctx, "download"),
-        _button("tabs", "Pick another tab", TABS_ACTION, {"prompt": "Show me the other tabs"}, "tab"),
+        _button("styles", "Chart styles", STYLES_ACTION, {"sheet": a.sheet, "prompt": f"Show chart styles for {a.sheet}"}, "bar_chart"),
     ]
+    if tabs > 1:
+        comps.append(_button("tabs", "Pick another tab", TABS_ACTION, {"prompt": "Show me the other tabs"}, "tab"))
+    if hint and "to fix" in hint:
+        comps.append(_button(REVIEW_ACTION, "Review my file", REVIEW_ACTION, {"prompt": "Review my file"}, "fact_check"))
     root = {"id": "root", "component": "Canvas", "cardTitle": f"{a.sheet} · {STYLES[a.style][0]}",
-            "cardDescription": n.headline[:200], "cardIcon": "insights", "autoOpen": True, "children": ["frame", PDF_ACTION, "tabs"]}
+            "cardDescription": n.headline[:200], "cardIcon": "insights", "autoOpen": True, "children": [c["id"] for c in comps]}
     return a2ui.surface("dash", [root, *comps])
 
 

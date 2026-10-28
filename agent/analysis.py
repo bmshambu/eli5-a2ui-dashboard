@@ -21,7 +21,7 @@ from .sheets import Profile, Sheet, is_rate, label, profile
 # style id: (name, Material icon, what it shows)
 STYLES = {
     "auto": ("Auto pick", "auto_awesome", "I pick the view that tells the clearest story"),
-    "explore": ("Interactive explorer", "dashboard", "Power BI-style: bubble chart and heatmap with slicers, click-to-filter and a sortable table"),
+    "explore": ("Dashboard", "dashboard", "Power BI-style: filters, bubble chart, treemap, heatmap and table, with insights beside every view"),
     "trend": ("Trend + forecast", "show_chart", "Trend line, rolling average and a 3-period forecast band, with peaks and jumps marked"),
     "pareto": ("Ranked drivers (80/20)", "bar_chart", "Ranked bars with running share; the few items that make 80% stand out"),
     "bridge": ("Change bridge", "waterfall_chart", "Waterfall from the first to the last period: which categories drove the change"),
@@ -97,7 +97,7 @@ class Analysis:
 
 def available(p: Profile) -> dict[str, bool]:
     t, d, m = bool(p.time), bool(p.dimensions), len(p.measures)
-    return {"auto": m > 0, "explore": m > 0 and d, "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
+    return {"auto": m > 0, "explore": m > 0 and (d or bool(p.label)), "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
             "heatmap": d and m > 0 and (t or len(p.dimensions) > 1), "multiples": t and d and m > 0,
             "scatter": m > 1, "distribution": m > 0}
 
@@ -652,6 +652,7 @@ def _distribution(a: Analysis, df, p: Profile, f: _Facts) -> None:
 # ── Interactive explorer (Power BI-style) ────────────────────────────────────
 
 MAX_CUBE_ROWS = 6000
+MAX_CUBE_DIMS = 6  # categories embedded as filters (fewer when the cube would get too big)
 MAX_ID_ROWS = 1500  # below this, each row can be its own bubble (e.g. one per customer)
 
 
@@ -671,7 +672,7 @@ def cube(base: pd.DataFrame, p: Profile) -> dict:
     """The tab pre-aggregated by its categories and periods, small enough to embed in the page.
     Rows are [category index..., period index or -1, row count, sum and count per measure]; the
     page filters and regroups them in the browser, so slicers and clicks need no round trip."""
-    dims = [d for d in p.dimensions if base[d].nunique() <= 30][:3]
+    dims = [d for d in p.dimensions if base[d].nunique() <= 30][:MAX_CUBE_DIMS]
     ident = _id_column(base, p)
     keys = dims + ([ident] if ident else [])
     measures = p.measures[:6]

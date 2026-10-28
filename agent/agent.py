@@ -1,9 +1,11 @@
 """Spreadsheet insights agent for Gemini Enterprise.
 
-The flow: the user uploads an .xlsx or .csv, picks a tab (tab picker card, skipped when there is
-one tab), picks a chart style (style picker card), and the side panel opens a dashboard: the
-chart plus the story behind it (headline, KPI tiles, insights with evidence, actions, follow-up
-questions). Typed requests work at any point: "show revenue by region as a heatmap", "use the
+The flow: the user uploads an .xlsx or .csv (GE sends an .xlsx as one CSV per tab; they are read
+together, and lookup tabs are joined onto the tab that points at them), and the side panel opens
+straight on the dashboard of the main tab: filters, KPIs, bubble/treemap/heatmap/table views, a
+"What this shows" panel and the AI summary beside them. "Other charts", "Chart styles" and "Pick
+another tab" lead to the classic one-chart reports (headline, KPI tiles, insights with evidence,
+actions, follow-up questions). Typed requests work at any point: "show revenue by region as a heatmap", "use the
 Customers tab", "why did West fall?" (a question re-tells the current chart's story around it).
 
 All numbers come from analysis.py (pandas, no model). The one model call per chart writes the
@@ -143,6 +145,12 @@ def review_reply(up: sheets.Upload) -> Reply:
     return Reply(f"**{review.headline(up.name, tabs)}.** The full check is open in the side panel.", messages)
 
 
+def main_tab(tabs: list[sheets.Sheet]) -> sheets.Sheet:
+    """The tab to open first: the one other tabs were joined onto (Orders), else one that can be a
+    dashboard, else the biggest."""
+    return max(tabs, key=lambda t: (len(t.joined), analysis.available(sheets.profile(t))["explore"], len(t.df)))
+
+
 def tabs_reply(up: sheets.Upload, tabs: list[sheets.Sheet], hint: str | None = None) -> Reply:
     if len(tabs) == 1:
         return styles_reply(up, tabs[0], hint)
@@ -156,8 +164,11 @@ def styles_reply(up: sheets.Upload, sheet: sheets.Sheet, hint: str | None = None
 
 
 async def chart(up: sheets.Upload, sheet: sheets.Sheet, style: str = "auto", measure: str | None = None,
-                dim: str | None = None, focus: str | None = None, filters: dict | None = None) -> Reply:
-    """The dashboard: computed analysis, then the narrative (model, or facts-only on failure)."""
+                dim: str | None = None, focus: str | None = None, filters: dict | None = None,
+                hint: str | None = None, tabs: int = 1) -> Reply:
+    """The dashboard: computed analysis, then the narrative (model, or facts-only on failure).
+    `hint` is the upload's review hint (said only when there is something to fix or check)."""
+    hint = None if hint and hint.startswith("Nothing to fix") else hint
     retry = {"sheet": sheet.name, "style": style, "measure": measure, "dim": dim, "prompt": f"Show {sheet.name} again"}
     if filters:
         retry["filters"] = filters
@@ -173,14 +184,19 @@ async def chart(up: sheets.Upload, sheet: sheets.Sheet, style: str = "auto", mea
         log.exception("narrative failed for %s/%s; using the facts-only narrative", sheet.name, a.style)
         n = llm.fallback(a)
     try:
-        messages = render.dashboard_card(a, n, up.name)
+        messages = render.dashboard_card(a, n, up.name, hint, tabs)
         validate.check(messages)
     except Exception:  # noqa: BLE001
         log.exception("dashboard card failed for %s/%s", sheet.name, a.style)
         return Reply("Sorry, I couldn't draw that one.", render.error_card("The chart didn't render. Try again or pick another style.", retry))
     remember = {"file": up.name, **a.meta(), "narrative": n.model_dump(mode="json")}
-    return Reply(f"**{n.headline}**\n\n{STYLES[a.style][0]} of {a.measure} from the {a.sheet} tab is open in the side panel.",
-                 messages, remember)
+    where = (f"The {a.measure} dashboard for the {a.sheet} tab is open in the side panel: filter along the top, "
+             "switch views on the tabs and read the insights beside the chart." if a.style == "explore"
+             else f"{STYLES[a.style][0]} of {a.measure} from the {a.sheet} tab is open in the side panel.")
+    j = sheet.joined
+    extra = (f"\n\nI joined the {', '.join(j[:-1]) + ' and ' + j[-1] if len(j) > 1 else j[0]} tab{'s' if len(j) > 1 else ''} "
+             f"onto {sheet.name} by their ID columns, so their columns work as filters here.") if j else ""
+    return Reply(f"**{n.headline}**\n\n{where}{extra}" + (f"\n\n{hint}" if hint else ""), messages, remember)
 
 
 def _filters(ctx: dict | None) -> dict | None:
@@ -237,23 +253,26 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
         return tabs_reply(up, tabs)
     if name == render.TAB_ACTION:
         sheet = _sheet(tabs, ctx.get("sheet"))
+        return await chart(up, sheet, tabs=len(tabs)) if sheet else tabs_reply(up, tabs)
+    if name == render.STYLES_ACTION:
+        sheet = _sheet(tabs, ctx.get("sheet"))
         return styles_reply(up, sheet) if sheet else tabs_reply(up, tabs)
     if name == render.CHART_ACTION:
         sheet = _sheet(tabs, ctx.get("sheet"))
         if sheet is None:
             return tabs_reply(up, tabs)
-        return await chart(up, sheet, ctx.get("style") or "auto", ctx.get("measure"), ctx.get("dim"), filters=_filters(ctx))
+        return await chart(up, sheet, ctx.get("style") or "auto", ctx.get("measure"), ctx.get("dim"), filters=_filters(ctx), tabs=len(tabs))
 
     # Typed text, or the prompt of an "Ask next" chip (which also carries the chart it came from).
     base = ctx if name == render.ASK_ACTION else (None if fresh else last)
     if base and base.get("file", up.name) != up.name:
         base = None
     hint = review_hint(up) if fresh else None
-    if not text or _GREETING.match(text):
-        return tabs_reply(up, tabs, hint)
     if _TABS.search(text):
         return tabs_reply(up, tabs, hint)
-    sheet = sheet_in(text, tabs) or (_sheet(tabs, base.get("sheet")) if base else None) or (tabs[0] if len(tabs) == 1 else None)
+    if not text or _GREETING.match(text):  # a new file opens straight on the dashboard
+        return await chart(up, main_tab(tabs), hint=hint, tabs=len(tabs)) if fresh else tabs_reply(up, tabs)
+    sheet = sheet_in(text, tabs) or (_sheet(tabs, base.get("sheet")) if base else None) or (main_tab(tabs) if fresh or len(tabs) == 1 else None)
     if sheet is None:
         return tabs_reply(up, tabs, hint)
     style = style_in(text)
@@ -262,21 +281,21 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
     dim = _find(prof.dimensions, text, prefer_after="by")
     same_sheet = base and base.get("sheet") == sheet.name
     if fresh and style is None and measure is None and dim is None and not text.rstrip().endswith("?"):
-        return styles_reply(up, sheet, hint)  # "here's my file, use the Sales tab" -> pick a style
+        return await chart(up, sheet, hint=hint, tabs=len(tabs))  # "here's my file, use the Sales tab" -> its dashboard
     command = style is not None or (sheet_in(text, tabs) is not None and not text.rstrip().endswith("?"))
     return await chart(up, sheet,
                        style or (base.get("style") if same_sheet else None) or "auto",
                        measure or (base.get("measure") if same_sheet else None),
                        dim or (base.get("dim") if same_sheet else None),
                        focus=None if command else text,
-                       filters=_filters(base) if same_sheet and not style_in(text) else None)
+                       filters=_filters(base) if same_sheet and not style_in(text) else None, hint=hint, tabs=len(tabs))
 
 
 class SheetInsightsAgent(BaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         log.info("turn parts: %s", sheets.describe(ctx.user_content))
         uploaded = sheets.uploads_in(ctx.user_content)
-        up = uploaded[-1] if uploaded else sheets.latest(ctx.session.events)
+        up = sheets.bundle(uploaded) if uploaded else sheets.latest(ctx.session.events)
         other_files = [p for p in getattr(ctx.user_content, "parts", None) or []
                        if getattr(p, "inline_data", None) and not (p.inline_data.data or b"").startswith(a2ui.TAG_START)]
         if other_files and not uploaded:
