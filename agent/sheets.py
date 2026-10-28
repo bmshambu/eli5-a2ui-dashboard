@@ -269,6 +269,8 @@ def tidy(name: str, raw: pd.DataFrame) -> Sheet | None:
     df = raw.iloc[h + 1:].copy()
     df.columns = _names(raw.iloc[h].tolist())
     df = df.dropna(how="all").reset_index(drop=True)
+    # A column that only held a title above the table is empty below it.
+    df = df[[c for c in df.columns if not (c.startswith("Column ") and df[c].isna().all())]]
     if len(df) > MAX_ROWS:
         notes.append(f"Used the first {MAX_ROWS:,} of {len(df):,} rows.")
         df = df.head(MAX_ROWS)

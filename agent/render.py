@@ -25,8 +25,9 @@ def _text(cid: str, text: str, hint: str = "body") -> dict:
 
 
 def _flat(context: dict) -> dict:
-    """A2UI context values must be plain values, so nested ones (the explorer's filters) travel as JSON."""
-    return {k: json.dumps(v, separators=(",", ":")) if isinstance(v, (dict, list)) else v for k, v in context.items()}
+    """A2UI context values must be plain values: nested ones (the explorer's filters) travel as JSON and
+    empty ones (no category column, so dim is None) are left out."""
+    return {k: json.dumps(v, separators=(",", ":")) if isinstance(v, (dict, list)) else v for k, v in context.items() if v is not None}
 
 
 def _button(cid: str, label: str, action: str, context: dict, icon: str | None = None, variant: str = "stroked") -> dict:

@@ -97,7 +97,7 @@ class Analysis:
 
 def available(p: Profile) -> dict[str, bool]:
     t, d, m = bool(p.time), bool(p.dimensions), len(p.measures)
-    return {"auto": m > 0, "explore": m > 0 and (d or t), "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
+    return {"auto": m > 0, "explore": m > 0 and d, "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
             "heatmap": d and m > 0 and (t or len(p.dimensions) > 1), "multiples": t and d and m > 0,
             "scatter": m > 1, "distribution": m > 0}
 
@@ -211,6 +211,10 @@ def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: 
             filters: dict | None = None) -> Analysis:
     p = profile(sheet)
     if not p.measures:
+        if len(sheet.df) < 2:
+            raise ValueError(f"the {sheet.name} tab has only one row of data, so there is nothing to compare")
+        if any(pd.api.types.is_numeric_dtype(sheet.df[c]) for c in sheet.df.columns if c != p.time):
+            raise ValueError(f"every number column in the {sheet.name} tab holds the same value in every row, so there is nothing to compare")
         raise ValueError(f"the {sheet.name} tab has no number columns to chart")
     df, used, described = apply_filters(sheet.df, p, filters)
     measure = measure if measure in p.measures else p.measures[0]
@@ -723,6 +727,8 @@ def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
         x, y, sz = f"m:{m0}:growth", f"m:{m0}:total", f"m:{m1}:total" if m1 is not None else "rows"
     else:  # no dates: two numbers against each other, a third as bubble size
         x = f"m:{m1}:avg" if m1 is not None else "rows"
+        if x == "rows" and not ms[m0]["rate"] and base[names[detail]].is_unique:
+            x = f"m:{m0}:share"  # one row per bubble: a row count would stack every bubble on one line
         y = f"m:{m0}:avg" if detail == ident else f"m:{m0}:total"
         sz = f"m:{m2}:avg" if m2 is not None else "rows"
     color = plain[0] if detail == ident and plain else detail

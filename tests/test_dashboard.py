@@ -5,6 +5,7 @@ import pathlib
 import re
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from google.adk.runners import InMemoryRunner
@@ -378,3 +379,59 @@ def test_one_row_per_category_sheet_charts_in_every_style():
     for style in analysis.STYLES:
         a = analysis.analyze(sheet, style)
         validate.check(render.dashboard_card(a, llm.fallback(a), up.name))
+
+
+def _sheet_of(df: pd.DataFrame) -> sheets.Sheet:
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    sheet, = sheets.read(sheets.Upload("x.xlsx", buf.getvalue(), sheets.XLSX))
+    return sheet
+
+
+_rng = np.random.default_rng(1)
+_CITIES = ["London", "Paris", "Delhi", "Mumbai", "Tokyo", "Sydney", "Cairo", "Oslo", "Lima", "Rome", "Seoul", "Dubai"]
+SHAPES = {
+    "numbers only": pd.DataFrame({"a": _rng.normal(size=30), "b": _rng.normal(size=30)}),
+    "one number column": pd.DataFrame({"v": _rng.integers(1, 100, 40)}),
+    "dates and one number": pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-02-01"]), "v": [1, 2]}),
+    "year column": pd.DataFrame({"year": [2020, 2021, 2022, 2023], "v": [1, 4, 9, 16]}),
+    "one number per city": pd.DataFrame({"city": _CITIES, "v": _rng.integers(1, 50, 12)}),
+    "two rows": pd.DataFrame({"city": ["A", "B"], "v": [1, 2]}),
+    "gaps and text": pd.DataFrame({"city": _CITIES, "v": [1, None, 3, "n/a", 5, 6, "-", 8, 9, None, 11, 12], "w": [None] * 12}),
+    "single period": pd.DataFrame({"date": pd.to_datetime(["2024-01-01"] * 10), "city": _CITIES[:10], "v": range(10)}),
+}
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_unusual_sheet_shapes_chart_in_every_style(shape):
+    sheet = _sheet_of(SHAPES[shape])
+    for style in analysis.STYLES:
+        a = analysis.analyze(sheet, style)
+        messages = render.dashboard_card(a, llm.fallback(a), "x.xlsx")
+        validate.check(messages)  # e.g. no null values in button contexts when there is no category column
+        if a.style == "explore":
+            assert _explorer_data(page.page(a, llm.fallback(a), "x.xlsx"))["cube"]["dims"]
+
+
+@pytest.mark.parametrize("df,message", [
+    (pd.DataFrame({"city": ["London"], "v": [18]}), "only one row"),
+    (pd.DataFrame({"city": _CITIES, "v": [0] * 12}), "same value in every row"),
+])
+def test_sheets_with_nothing_to_compare_say_why(df, message):
+    with pytest.raises(ValueError, match=message):
+        analysis.analyze(_sheet_of(df))
+
+
+def test_title_above_the_table_does_not_leave_an_empty_column():
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "Weather report Q3"
+    ws.append([])
+    ws.append([None, "City", "Max temp", "Min temp"])
+    for row in [("London", 18, 9), ("Paris", 21, 12), ("Rome", 29, 19), ("Oslo", 9, 1)]:
+        ws.append([None, *row])
+    buf = io.BytesIO()
+    wb.save(buf)
+    sheet, = sheets.read(sheets.Upload("x.xlsx", buf.getvalue(), sheets.XLSX))
+    assert list(sheet.df.columns) == ["City", "Max temp", "Min temp"]
