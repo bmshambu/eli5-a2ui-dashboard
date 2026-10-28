@@ -294,6 +294,15 @@ def _explorer_data(html_: str) -> dict:
     return json.loads(m.group(1).replace("<\\/", "</"))
 
 
+def test_treemap_groups_by_the_coarse_category_and_colours_by_a_score(tabs):
+    a = analysis.analyze(_tab(tabs, "Customers"), "explore")
+    d, dims = a.chart["defaults"], a.chart["cube"]["dims"]
+    assert dims[d["tmGroup"]]["name"] == "Segment" and dims[d["tmCell"]]["name"] == "Customer ID"
+    assert a.chart["cube"]["measures"][int(d["tmColor"].split(":")[1])]["name"] == "NPS score"
+    sales = analysis.analyze(_tab(tabs, "Monthly Sales"), "explore").chart
+    assert sales["cube"]["dims"][sales["defaults"]["tmGroup"]]["name"] == "Product"  # 4 products group 5 regions
+
+
 def test_auto_picks_the_explorer_when_there_are_categories(tabs):
     for name in ("Monthly Sales", "Spend by Dept", "Customers"):
         assert analysis.analyze(_tab(tabs, name)).style == "explore"
@@ -313,8 +322,11 @@ def test_explorer_cube_page_validates_and_fits(tabs, tab):
     for key in ("x", "y", "size"):  # every default metric is one the page offers
         mid = d[key]
         assert mid == "rows" or int(mid.split(":")[1]) < len(cube["measures"])
-    for vid in ("ex-bins", "ex-hins", "ex-tins", "ex-kins"):  # an insight panel per visual
+    for vid in ("ex-v-bubble", "ex-v-tree", "ex-v-heat", "ex-v-table", "ex-side", "ex-rank", "ex-card"):  # four views, side story, ranked list
         assert f'id="{vid}"' in html_
+    dims = cube["dims"]
+    assert d["tmCell"] < len(dims) and (d["tmGroup"] is None or (d["tmGroup"] < len(dims) and d["tmGroup"] != d["tmCell"]))
+    assert d["tmSize"] == "rows" or not cube["measures"][int(d["tmSize"].split(":")[1])]["rate"]  # blocks are sized by an amount
 
 
 def test_cube_totals_match_the_sheet(tabs):

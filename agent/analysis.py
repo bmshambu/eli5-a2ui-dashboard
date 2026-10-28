@@ -707,6 +707,19 @@ def cube(base: pd.DataFrame, p: Profile) -> dict:
             "measures": [{"name": m, "rate": is_rate(m)} for m in measures], "rows": rows}
 
 
+def _treemap_defaults(dims: list, ms: list, plain: list[int], ident: int | None, m0: int, has_time: bool) -> dict:
+    """Blocks grouped by the coarsest category, cells by the finest (or one per row), sized by the
+    main amount and coloured by a score: a rate if there is one, else growth, else a second number."""
+    by_size = sorted(plain, key=lambda i: len(dims[i]["values"]))
+    group = by_size[0] if len(by_size) >= 2 or (by_size and ident is not None) else None
+    cell = next((i for i in reversed(by_size) if i != group), ident if ident is not None else (by_size[0] if by_size else 0))
+    size = f"m:{m0}:total" if not ms[m0]["rate"] else "rows"
+    rate = next((i for i, m in enumerate(ms) if m["rate"] and i != m0), None)
+    other = next((i for i in range(len(ms)) if i != m0), None)
+    color = f"m:{rate}:avg" if rate is not None else f"m:{m0}:growth" if has_time else f"m:{other}:avg" if other is not None else "group"
+    return {"tmGroup": group, "tmCell": cell, "tmSize": size, "tmColor": color}
+
+
 def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
     base = a.base
     partial = _partial_period(base, p) if p.time else None
@@ -745,7 +758,8 @@ def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
         init["from"] = next((i for i, t in enumerate(iso) if lo and t >= lo), None) if lo else None
         init["to"] = max((i for i, t in enumerate(iso) if hi and t <= hi), default=None) if hi else None
     a.chart.update({"type": "explore", "cube": c, "init": init,
-                    "defaults": {"detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0}})
+                    "defaults": {"detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0,
+                                 **_treemap_defaults(dims, ms, plain, ident, m0, bool(p.time))}})
     _quadrant_fact(f, a, df, p)
     if a.dim:
         cats = by_cat(df, a.dim, a.measure, a.agg)
