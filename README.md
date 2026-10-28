@@ -1,16 +1,18 @@
 # Sheet Insights: spreadsheet to chart plus insight, in Gemini Enterprise
 
-A proof-of-concept Gemini Enterprise (GE) agent. The user uploads an Excel or CSV file, picks a tab, picks
-a chart style, and GE's side panel (A2UI Canvas) opens a dashboard: the chart **plus the story behind it**.
+A proof-of-concept Gemini Enterprise (GE) agent. The user uploads an Excel or CSV file and GE's side panel
+(A2UI Canvas) opens straight on a Power BI-style dashboard: filters, charts **and the story behind them**.
+Seven classic chart styles (trend with forecast, 80/20, bridge and more) are one tap away.
 Built on the [eli5-a2ui](https://github.com/bmshambu/eli5-a2ui) boilerplate (Python ADK on Vertex AI
 Agent Engine, A2UI v0.9).
 
 ![Trend with forecast](docs/trend.png)
 
-## Interactive explorer (Power BI-style)
+## Dashboard (Power BI-style)
 
-The default view when a tab has a number and a category. One page in the side panel, everything filtered in
-the browser with no round trip to the agent:
+What opens after an upload, for any tab with a number and either a category or a column naming each row
+(one row per city is fine). One page in the side panel, everything filtered in the browser with no round trip
+to the agent:
 
 - **Filters along the top**: a date range and a dropdown checklist per category.
 - **Four views on tabs**:
@@ -25,8 +27,18 @@ the browser with no round trip to the agent:
   correlation, outliers, hottest cells), and when you hover a bubble, block or group heading, the story of
   that one (rank, share of its group, how its score compares). A rich hover card shows the numbers.
 - **Cross-filter**: click a bubble, block, cell or row and everything else filters to it; click again to clear.
+- **AI summary** beside the chart: the headline and insights for the whole tab, and follow-up questions.
 - **Explain this view**: sends the current filters back to the agent, which re-runs the full analysis on
   just those rows and writes the story for them. The PDF button then exports that filtered view.
+
+### Workbooks with several tabs
+
+GE hands an .xlsx to the agent as one CSV per tab (`sales.xlsx_Sheet2_Orders.csv`), so the agent reads all
+the files of an upload together as one workbook. Lookup tabs are joined onto the tab that points at them, like
+a star schema: Orders has ProductID and CustomerID, Products and Customers list each ID once, so Orders gains
+Category, Segment, State and so on as filters. A tab that only flags some IDs (Returns: OrderID, Returned =
+Yes) becomes a Yes/No column. The dashboard opens on the tab the others were joined onto, and the file check
+marks the lookup tabs as joined rather than "can't chart".
 
 The page carries a pre-aggregated cube (at most 6,000 rows by category, period and up to 6 numbers), so it
 stays well under GE's 800 KB message limit on large sheets.
@@ -35,9 +47,11 @@ Every view (explorer and the 7 chart styles) follows the device's light or dark 
 Auto / Light / Dark switch at the top lets the viewer override it, since GE's own theme can differ from the
 device's. Heatmap and treemap colours flip with the theme so low values stay close to the background.
 
-![Interactive explorer: bubbles](docs/explorer.png)
+![Dashboard: bubbles](docs/explorer.png)
 
-![Interactive explorer: treemap](docs/explorer-treemap.png)
+![Dashboard: treemap](docs/explorer-treemap.png)
+
+![Dashboard of a joined Orders tab, dark theme](docs/dashboard-joined.png)
 
 ## File check before charting
 
@@ -63,7 +77,7 @@ Excel draws the numbers you select. This agent reads the whole tab and works out
 
 | | |
 |---|---|
-| **Interactive explorer** | bubbles, treemap, heatmap and table with filters, click-to-filter, zoom and a live "What this shows" panel |
+| **Dashboard** | bubbles, treemap, heatmap and table with filters, click-to-filter, zoom and a live "What this shows" panel |
 | **Trend + forecast** | trend line, 3-period rolling average, a 3-period forecast with a 95% range; peak, low and biggest move marked |
 | **Ranked drivers (80/20)** | ranked bars with running share; the few items that make 80% of the total highlighted |
 | **Change bridge** | waterfall from the first to the last period: how much each category added or took away |

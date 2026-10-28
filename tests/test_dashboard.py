@@ -11,7 +11,7 @@ import pytest
 from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
-from agent import a2ui, agent as dash, analysis, charts, llm, page, pdf, render, sheets, validate
+from agent import a2ui, agent as dash, analysis, charts, llm, page, pdf, render, review, sheets, validate
 from agent.schema import Insight, Narrative
 
 SAMPLE = pathlib.Path(__file__).resolve().parent.parent / "samples" / "sample_workbook.xlsx"
@@ -221,24 +221,34 @@ def _converse(turns):
 def test_upload_tab_style_dashboard_ask_and_pdf(fake):
     turns = _converse([
         _upload(BOOK),
-        _click("tab", {"sheet": "Spend by Dept", "prompt": "Use the Spend by Dept tab"}),
+        _click("tabs", {"prompt": "Show me the other tabs"}),
+        _click("styles", {"sheet": "Spend by Dept", "prompt": "Show chart styles for Spend by Dept"}),
         _click("chart", {"sheet": "Spend by Dept", "style": "bridge", "prompt": "Show Spend by Dept as change bridge"}),
         _click("ask", {"sheet": "Spend by Dept", "style": "bridge", "measure": "Value", "dim": "Department", "prompt": "Why did Marketing jump?"}),
         _click("pdf", {"sheet": "Spend by Dept", "style": "bridge", "measure": "Value", "dim": "Department"}),
+        _click("tab", {"sheet": "Customers", "prompt": "Use the Customers tab"}),
     ])
-    tabs_c = _components(_messages(turns[0]))
+    first = _messages(turns[0])
+    validate.check(first)
+    opened = _components(first)  # a new file opens straight on a dashboard, with the other routes as buttons
+    assert opened["root"]["component"] == "Canvas" and 'id="ex-data"' in opened["frame"]["htmlContent"]
+    assert {"pdf", "styles", "tabs"} <= set(opened) and "dashboard for the Monthly Sales tab is open" in turns[0][0].content.parts[0].text
+    assert "review" not in opened  # the file is clean, so no Review button
+    tabs_c = _components(_messages(turns[1]))
     assert {"tab0", "tab1", "tab2"} <= set(tabs_c) and tabs_c["tab1"]["action"]["event"]["context"]["sheet"] == "Spend by Dept"
-    styles_c = _components(_messages(turns[1]))
+    styles_c = _components(_messages(turns[2]))
     assert "st-bridge" in styles_c and "st-scatter" not in styles_c  # one number column: no relationship chart
-    dash_msgs = _messages(turns[2])
+    dash_msgs = _messages(turns[3])
     validate.check(dash_msgs)
     comps = _components(dash_msgs)
     assert comps["root"]["component"] == "Canvas" and "What moved Value" in comps["frame"]["htmlContent"]
-    assert len(fake.calls) == 2 and "Why did Marketing jump?" in fake.calls[1][0]
-    assert _components(_messages(turns[3]))["root"]["component"] == "Canvas"
-    files = [p for e in turns[4] for p in e.content.parts if p.inline_data and p.inline_data.mime_type == "application/pdf"]
+    assert "Why did Marketing jump?" in fake.calls[2][0]
+    assert _components(_messages(turns[4]))["root"]["component"] == "Canvas"
+    files = [p for e in turns[5] for p in e.content.parts if p.inline_data and p.inline_data.mime_type == "application/pdf"]
     assert len(files) == 1 and files[0].inline_data.data.startswith(b"%PDF") and files[0].inline_data.display_name == "Spend-by-Dept-insights.pdf"
-    assert len(fake.calls) == 2  # the PDF needs no model call
+    assert len(fake.calls) == 4  # upload, bridge, question, Customers tab: the PDF needs no model call
+    picked = _components(_messages(turns[6]))  # picking a tab opens its dashboard too
+    assert picked["root"]["cardTitle"] == "Customers · Dashboard"
 
 
 def test_typed_request_with_upload_goes_straight_to_the_chart(fake):
@@ -269,9 +279,10 @@ def test_no_upload_and_wrong_file_type_get_the_welcome(fake):
     assert "Excel (.xlsx) and CSV" in wrong[0].content.parts[0].text
 
 
-def test_single_tab_csv_skips_the_tab_picker(fake):
+def test_single_tab_csv_opens_on_the_dashboard(fake):
     first, = _converse([_upload(sheets.Upload("results.csv", CSV_TEXT.encode(), sheets.CSV))])
-    assert "dash-styles" in _messages(first)[0]["createSurface"]["surfaceId"]
+    comps = _components(_messages(first))
+    assert comps["root"]["cardTitle"].endswith("Dashboard") and "tabs" not in comps  # one tab: no tab picker button
 
 
 def test_page_is_self_contained(tabs):
@@ -519,13 +530,13 @@ def test_upload_offers_review_with_a_hint_and_review_opens_the_check(fake):
     turns = _converse([_upload(MESSY), _click("review", {"prompt": "Review my file"}), _text("can you check my file?")])
     first = _components(_messages(turns[0]))
     assert first["review"]["action"]["event"]["name"] == "review"
-    assert "5 things to fix" in first["reviewd"]["text"]
+    assert "5 things to fix" in turns[0][0].content.parts[0].text
     for t in turns[1:]:
         msgs = _messages(t)
         validate.check(msgs)
         comps = _components(msgs)
         assert comps["root"]["component"] == "Canvas" and "Column F has values but no header" in comps["frame"]["htmlContent"]
-    assert not fake.calls  # the review needs no model call
+    assert len(fake.calls) == 1  # the upload's dashboard; the review needs no model call
 
 
 def test_file_with_no_numbers_offers_the_review():
@@ -537,3 +548,66 @@ def test_file_with_no_numbers_offers_the_review():
 
 def test_welcome_card_validates():
     validate.check(render.welcome_card())
+
+
+# --- star-schema workbooks and GE's one-CSV-per-tab uploads ---------------------------------
+
+def _shop_parts(book: str = "ecommerce_data.xlsx") -> list[sheets.Upload]:
+    """Orders plus three lookup tabs, as GE delivers an .xlsx: one CSV per tab."""
+    rng = np.random.default_rng(1)
+    products = pd.DataFrame({"ProductID": [f"P{i}" for i in range(6)], "ProductName": [f"Item {i}" for i in range(6)],
+                             "Category": ["Furniture", "Technology", "Office"] * 2, "UnitPrice": [10, 200, 5, 80, 900, 12]})
+    customers = pd.DataFrame({"CustomerID": [f"C{i}" for i in range(8)], "CustomerName": [f"Customer {i}" for i in range(8)],
+                              "Segment": ["Consumer", "Corporate"] * 4, "State": ["CA", "NY", "TX", "WA"] * 2})
+    orders = pd.DataFrame({"OrderID": [f"O{i}" for i in range(60)], "CustomerID": [f"C{i % 8}" for i in range(60)],
+                           "ProductID": [f"P{i % 6}" for i in range(60)], "Sales": rng.uniform(10, 900, 60).round(2),
+                           "Profit": rng.uniform(-50, 200, 60).round(2), "Quantity": rng.integers(1, 6, 60),
+                           "OrderDate": pd.date_range("2024-01-01", periods=60, freq="6D").strftime("%Y-%m-%d")})
+    returns = pd.DataFrame({"OrderID": ["O3", "O9", "O20", "O41", "O55"], "Returned": "Yes"})
+    return [sheets.Upload(f"{book}_Sheet{i + 1}_{name}.csv", df.to_csv(index=False).encode(), sheets.CSV)
+            for i, (name, df) in enumerate((("Orders", orders), ("Products", products), ("Customers", customers), ("Returns", returns)))]
+
+
+def test_lookup_tabs_are_joined_onto_the_fact_tab():
+    tabs = sheets.read(sheets.bundle(_shop_parts()))
+    assert [t.name for t in tabs] == ["Orders", "Products"]  # Customers and Returns have no numbers of their own
+    orders = tabs[0]
+    assert orders.joined == ["Products", "Customers", "Returns"]
+    assert {"Category", "Segment", "State", "Returned"} <= set(orders.df.columns)
+    assert orders.df.loc[orders.df.OrderID == "O9", "Returned"].item() == "Yes" and (orders.df.Returned == "No").sum() == 55
+    assert orders.df.loc[orders.df.ProductID == "P4", "Category"].iloc[0] == "Technology"
+    assert {"Category", "Segment", "Returned"} <= set(sheets.profile(orders).dimensions)
+    assert tabs[1].joined == []  # Products is a lookup, not a fact: nothing is joined onto it
+
+
+def test_ge_split_workbook_opens_the_joined_dashboard(fake):
+    parts = _shop_parts()
+    msg = genai_types.Content(role="user", parts=[genai_types.Part(inline_data=genai_types.Blob(mime_type=u.mime, data=u.data,
+                                                                                                 display_name=u.name)) for u in parts])
+    turns = _converse([msg, _text("show Profit")])
+    msgs = _messages(turns[0])
+    validate.check(msgs)
+    comps = _components(msgs)
+    assert comps["root"]["cardTitle"] == "Orders · Dashboard"
+    html_ = comps["frame"]["htmlContent"]
+    data = json.loads(re.search(r'<script type="application/json" id="ex-data">(.*?)</script>', html_, re.S).group(1))
+    assert {"Category", "Segment", "Returned"} <= {d["name"] for d in data["cube"]["dims"]}
+    assert "ecommerce_data.xlsx" in html_ and "AI summary" in html_ and "I joined the Products, Customers and Returns tabs onto Orders" in turns[0][0].content.parts[0].text
+    assert "Profit" in _components(_messages(turns[1]))["root"]["cardTitle"] or "Profit dashboard" in _components(_messages(turns[1]))["frame"]["htmlContent"]
+
+
+def test_review_of_a_split_workbook_treats_lookups_as_fine():
+    tabs = review.review(sheets.bundle(_shop_parts()))
+    by = {t.name: t for t in tabs}
+    assert by["Returns"].status == "lookup" and by["Customers"].status == "lookup" and by["Orders"].status == "ready"
+    assert review.counts(tabs) == (0, 0)
+
+
+def test_one_row_per_city_still_gets_the_dashboard():
+    rows = "\n".join(f"City {i},{20 + i % 9},{5 + i % 7},{70 + i % 25},{30 + i % 20}" for i in range(50))
+    up = sheets.Upload("weather_forecast.xlsx_Sheet1_Sheet1.csv",
+                       f"city,temperature highest,temperature lowest,humidity highest,humidity lowest\n{rows}\n".encode(), sheets.CSV)
+    up = sheets.bundle([up])
+    tab, = sheets.read(up)
+    assert up.name == "weather_forecast.xlsx" and tab.name == "Sheet1"
+    assert sheets.profile(tab).label == "city" and analysis.analyze(tab, "auto").style == "explore"

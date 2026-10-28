@@ -10,6 +10,7 @@ say something useful about tabs the chart flow would skip. Each finding is one o
 from __future__ import annotations
 
 import io
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -20,6 +21,7 @@ from .analysis import STYLES, _partial_period, available
 
 _ERROR = re.compile(r"^#(DIV/0!|N/A|REF!|VALUE!|NAME\?|NUM!|NULL!|SPILL!|CALC!)$", re.I)
 _FIX, _CHECK, _INFO = "fix", "check", "info"
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +40,7 @@ class TabReview:
     unlock: list[str] = field(default_factory=list)  # what to add to unlock more
     findings: list[Finding] = field(default_factory=list)
     chartable: bool = False
+    lookup: str = ""  # the tab this one is joined onto (sheets.link), when it only describes keys
 
     empty: bool = False
 
@@ -45,6 +48,8 @@ class TabReview:
     def status(self) -> str:
         if self.empty:
             return "empty"
+        if self.lookup and not self.chartable:
+            return "lookup"
         if not self.chartable:
             return "blocked"
         if any(f.level == _FIX for f in self.findings):
@@ -214,7 +219,7 @@ def review_tab(name: str, raw: pd.DataFrame, csv: bool = False) -> TabReview:
         t.unlock.append("Add a date, month or quarter column (or one column per month) to unlock "
                         "Trend + forecast, Change bridge, Heatmap and Small multiples.")
     if not p.dimensions:
-        t.unlock.append("Add a text column such as Region, Product or Team to unlock the Interactive explorer and Ranked drivers.")
+        t.unlock.append("Add a text column such as Region, Product or Team to unlock the Dashboard and Ranked drivers.")
     if len(p.measures) < 2:
         t.unlock.append("Add a second number column to unlock Relationship (one number against another).")
     if p.time:
@@ -235,7 +240,30 @@ def review(up: sheets.Upload) -> list[TabReview]:
             if r in raw.index and c in raw.columns:
                 raw.at[r, c] = v  # put the error text back so the column check can point at it
         tabs.append(review_tab(str(name), raw, csv))
+    _mark_links(up, tabs)
     return tabs
+
+
+def _mark_links(up: sheets.Upload, tabs: list[TabReview]) -> None:
+    """Say which tabs were joined together. A lookup tab (Customers: ID, name, segment) has no
+    numbers of its own, which is fine: its columns are charted as part of the tab it is joined onto."""
+    try:
+        tables = [t for t in (sheets.tidy(n, df, numbers=False) for n, df in sheets.frames(up)) if t is not None]
+        sheets.link(tables)
+    except Exception:  # noqa: BLE001  (the per-tab checks above already stand on their own)
+        log.exception("linking tabs failed for %s", up.name)
+        return
+    by_name = {t.name: t for t in tabs}
+    for fact in tables:
+        for note, look in zip([n for n in fact.notes if n.startswith("Added ")], fact.joined):
+            if fact.name in by_name:
+                by_name[fact.name].findings.append(Finding(_INFO, note))
+                by_name[fact.name].found = sheets.profile(fact).summary()
+            t = by_name.get(look)
+            if t is not None and not t.lookup:
+                t.lookup = fact.name
+                t.findings = [f for f in t.findings if not f.title.startswith("No column of numbers")]
+                t.findings.append(Finding(_INFO, f"Lookup tab: its columns are added to {fact.name}, so they can be used as filters there."))
 
 
 def counts(tabs: list[TabReview]) -> tuple[int, int]:
@@ -255,7 +283,7 @@ _CSS = """
 .pill{font-size:12px;font-weight:600;border-radius:999px;padding:2px 10px}
 .pill.ready{background:rgba(12,163,12,.14);color:var(--good)}.pill.check{background:rgba(250,178,25,.18);color:var(--ink)}
 .pill.blocked{background:rgba(227,73,72,.14);color:var(--bad)}.pill.fix{background:rgba(227,73,72,.10);color:var(--bad)}
-.pill.empty{background:var(--chip);color:var(--muted)}
+.pill.empty,.pill.lookup{background:var(--chip);color:var(--muted)}
 .rv-found{color:var(--ink2);font-size:13px;margin:4px 0 8px}
 .rv-list{list-style:none;margin:6px 0 0;padding:0}
 .rv-list li{display:grid;grid-template-columns:22px 1fr;gap:4px 8px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
@@ -269,7 +297,8 @@ _CSS = """
 .rv-foot{color:var(--muted);font-size:13px;margin-top:6px}
 """
 _MARK = {_FIX: "!", _CHECK: "?", _INFO: "i"}
-_PILL = {"ready": "Ready", "check": "Ready, worth a look", "fix": "Charts, but fix first", "blocked": "Can't chart yet", "empty": "Empty"}
+_PILL = {"ready": "Ready", "check": "Ready, worth a look", "fix": "Charts, but fix first", "blocked": "Can't chart yet", "empty": "Empty",
+         "lookup": "Lookup, joined in"}
 
 
 def headline(file: str, tabs: list[TabReview]) -> str:
@@ -288,7 +317,7 @@ def html(file: str, tabs: list[TabReview]) -> str:
     from . import page as pg
     e = pg._e
     fixes, checks = counts(tabs)
-    order = {"fix": 0, "blocked": 1, "check": 2, "ready": 3, "empty": 4}
+    order = {"fix": 0, "blocked": 1, "check": 2, "ready": 3, "lookup": 4, "empty": 5}
     blocks = []
     for t in sorted(tabs, key=lambda t: order[t.status]):
         items = "".join(f'<li><span class="rv-ic {f.level}" aria-label="{f.level}">{_MARK[f.level]}</span><span>{e(f.title)}</span>'
@@ -299,7 +328,7 @@ def html(file: str, tabs: list[TabReview]) -> str:
         if t.chartable:
             acts = '<div class="rv-act">' + pg._button("Chart this tab", "chart", {"sheet": t.name, "style": "auto",
                                                                                     "prompt": f"Chart the {t.name} tab"}, "chip on-accent") \
-                + pg._button("Pick a chart style", "tab", {"sheet": t.name, "prompt": f"Use the {t.name} tab"}) + "</div>"
+                + pg._button("Pick a chart style", "styles", {"sheet": t.name, "prompt": f"Show chart styles for {t.name}"}) + "</div>"
         unlock = "".join(f'<p class="rv-unlock"><b>Unlock more:</b> {e(u)}</p>' for u in t.unlock)
         styles = f'<p class="rv-styles">Can show: {e(", ".join(t.styles))}</p>' if t.styles else ""
         blocks.append(f'<section class="rv-tab"><div class="rv-head"><h2>{e(t.name)}</h2>'

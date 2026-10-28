@@ -51,7 +51,8 @@ details.dd summary b{background:var(--accent);color:#fff;border-radius:999px;pad
 .vt:hover{color:var(--ink)}.vt.on{background:var(--ink);color:var(--page)}
 .ex-set{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}.pair{display:inline-flex;gap:5px;align-items:center;white-space:nowrap}
 .ex-body{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:12px;align-items:start}
-@media (max-width:900px){.ex-body{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:1000px){.ex-body{grid-template-columns:minmax(0,1fr) 250px}}
+@media (max-width:680px){.ex-body{grid-template-columns:minmax(0,1fr)}}
 .vis{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
 .vhead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
 #ex-zoom{white-space:nowrap;border:1px solid var(--line);border-radius:6px;padding:3px 8px}
@@ -88,7 +89,7 @@ text-transform:uppercase;background:var(--page);color:var(--ink2);padding:0 6px;
 .tblbox{max-height:520px;overflow:auto}
 .ex .legend{margin-top:6px}.ex .ramp .rl{margin:0 6px;font-variant-numeric:tabular-nums}
 .side{display:flex;flex-direction:column;gap:10px;position:sticky;top:8px}
-#ex-side,#ex-rank{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px}
+#ex-side,#ex-rank,.brief{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px}
 .side-h,.rk-h{display:flex;justify-content:space-between;font:600 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
 .side-sub{font:inherit;color:var(--muted)}
 .side-t{margin:2px 0 4px;font-size:15px}
@@ -310,7 +311,7 @@ function renderBubble(){var P=bubblePoints(),pts=P.pts,sx=P.sx,sy=P.sy,svg=$('ex
   var xt=ticks(ex[0],ex[1],6),yt=ticks(ey[0],ey[1],6);
   var X=function(v){return L+(v-xt[0])/((xt[xt.length-1]-xt[0])||1)*(W-L-R);},Y=function(v){return H-B-(v-yt[0])/((yt[yt.length-1]-yt[0])||1)*(H-B-TP);};
   BZ={xt:xt,yt:yt};
-  var smax=Math.max.apply(null,pts.map(function(p){return p.s;}))||1,many=vis.length>60,rmax=many?16:30,rmin=many?3:5;
+  var smax=Math.max.apply(null,pts.map(function(p){return p.s;}))||1,rmax=Math.max(10,Math.min(30,150/Math.sqrt(vis.length||1))),rmin=vis.length>60?3:5;
   var Rr=function(s){return rmin+Math.sqrt(s/smax)*(rmax-rmin);};
   var h='';yt.forEach(function(t){h+='<line class="grid" x1="'+L+'" x2="'+(W-R)+'" y1="'+Y(t)+'" y2="'+Y(t)+'"/><text class="tick" x="'+(L-8)+'" y="'+(Y(t)+4)+'" text-anchor="end">'+esc(fmt(sy,t))+'</text>';});
   xt.forEach(function(t){h+='<text class="tick" x="'+X(t)+'" y="'+(H-B+18)+'" text-anchor="middle">'+esc(fmt(sx,t))+'</text>';});
@@ -535,8 +536,9 @@ buildFilters();buildTabs();buildSettings();render();
 """
 
 
-def render(a) -> str:
-    """The explorer's markup, its data and its script (page.CSS supplies the colour tokens)."""
+def render(a, brief: str = "") -> str:
+    """The explorer's markup, its data and its script (page.CSS supplies the colour tokens).
+    `brief` is extra markup for the side panel (the AI summary on the dashboard page)."""
     data = {"cube": a.chart["cube"], "defaults": a.chart["defaults"], "init": a.chart["init"],
             "meta": {"sheet": a.sheet, "dim": a.dim}}
     blob = json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
@@ -549,7 +551,7 @@ def render(a) -> str:
 <div id="ex-v-heat" hidden><div class="hm" id="ex-hm"></div></div>
 <div id="ex-v-table" hidden><div class="tblbox" id="ex-table"></div></div>
 <div class="legend" id="ex-vlegend"></div></div>
-<aside class="side"><div id="ex-side" aria-live="polite"></div><div id="ex-rank"></div></aside></div>
+<aside class="side"><div id="ex-side" aria-live="polite"></div>{brief}<div id="ex-rank"></div></aside></div>
 <div id="ex-card" class="hcard" hidden></div></div>
 <script type="application/json" id="ex-data">{blob}</script><script>{JS}</script>"""
 

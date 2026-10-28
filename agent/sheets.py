@@ -31,6 +31,7 @@ _BY_EXTENSION = {".xlsx": XLSX, ".xlsm": XLSM, ".csv": CSV, ".tsv": "text/tab-se
 SPREADSHEET_MIMES = (XLSX, XLSM, CSV, "text/tab-separated-values", "application/vnd.ms-excel", "text/plain")
 
 MAX_ROWS = 200_000
+MAX_LABEL_ROWS = 1500  # up to this many rows, a column naming each row can be one bubble per row
 _TOTAL = re.compile(r"^\s*(grand\s+)?(sub\s*-?\s*)?totals?\b", re.I)
 _ID_NAME = re.compile(r"(^|[\s_])(id|code|zip|postcode|phone|no\.?|number|#)$|^id[\s_]|[\s_]id$", re.I)
 _YEAR_NAME = re.compile(r"^(fy\s*)?(year|yr|fiscal\s*year)$", re.I)
@@ -38,13 +39,38 @@ _MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
 _MONTH = re.compile(r"^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(?:[\s'\-/]*(\d{2,4}))?$", re.I)
 _QUARTER = re.compile(r"^(?:q([1-4])[\s'\-/]*(?:fy)?\s*(\d{2,4})|(\d{4})[\s\-/]*q([1-4]))$", re.I)
 _YEARISH = re.compile(r"^(?:fy\s*)?(19|20)\d{2}$", re.I)
-_RATE_NAME = re.compile(r"(%|percent|rate|ratio|margin|price|avg|average|mean|score|index|nps|satisfaction|per\s)", re.I)
+_RATE_NAME = re.compile(r"(%|percent|rate|ratio|margin|price|avg|average|mean|score|index|nps|satisfaction|per\s|\btemp|humidity|rating)", re.I)
 
 
 class Upload(NamedTuple):
     name: str
     data: bytes
     mime: str
+    parts: tuple = ()  # a BUNDLE's files, one per tab (see bundle)
+
+
+BUNDLE = "application/x-sheet-bundle"
+# GE hands an .xlsx to the agent as one CSV per tab: "sales.xlsx_Sheet2_Orders.csv".
+_GE_TAB = re.compile(r"^(?P<book>.+?\.xls[xm]?)_Sheet\d+_(?P<tab>.+?)\.(?:csv|tsv)$", re.I)
+
+
+def bundle(ups: list[Upload]) -> Upload | None:
+    """The files of one turn as one workbook: GE splits an .xlsx into a CSV per tab, and several
+    CSVs uploaded together (Orders.csv, Products.csv) belong together just the same."""
+    if not ups:
+        return None
+    if len(ups) == 1:
+        m = _GE_TAB.match(ups[0].name)  # one tab of a workbook: show the workbook's name
+        return Upload(m.group("book"), ups[0].data, BUNDLE, (ups[0],)) if m else ups[0]
+    books = {m.group("book") for m in (_GE_TAB.match(u.name) for u in ups) if m}
+    name = books.pop() if len(books) == 1 else f"{len(ups)} files"
+    return Upload(name, b"\0".join(u.data for u in ups), BUNDLE, tuple(ups))
+
+
+def tab_name(name: str) -> str:
+    """A file's tab name: "Orders" for both "sales.xlsx_Sheet2_Orders.csv" and "Orders.csv"."""
+    m = _GE_TAB.match(name.rsplit("/", 1)[-1])
+    return m.group("tab") if m else _stem(name)
 
 
 def _mime(mime: str | None, name: str) -> str:
@@ -70,12 +96,12 @@ def uploads_in(content) -> list[Upload]:
 
 
 def latest(events, author: str = "user") -> Upload | None:
-    """The most recent spreadsheet uploaded in this session."""
+    """The most recent spreadsheet uploaded in this session (all files of that turn, bundled)."""
     for event in reversed(events or []):
         if getattr(event, "author", None) == author:
             ups = uploads_in(getattr(event, "content", None))
             if ups:
-                return ups[-1]
+                return bundle(ups)
     return None
 
 
@@ -94,11 +120,15 @@ class Sheet:
     df: pd.DataFrame  # tidy: one header row, typed columns
     notes: list[str] = field(default_factory=list)  # what tidying did, shown as data notes
     wide: bool = False  # melted from one-column-per-period
+    joined: list[str] = field(default_factory=list)  # lookup tabs joined on (see link)
 
 
 def read(upload: Upload) -> list[Sheet]:
-    """Every tab with numbers in it, tidied. Raises ValueError with a user-facing reason."""
-    sheets = [s for s in (tidy(name, df) for name, df in frames(upload)) if s is not None]
+    """Every tab with numbers in it, tidied, with lookup tabs joined on (see link). Raises
+    ValueError with a user-facing reason."""
+    tables = [s for s in (tidy(name, df, numbers=False) for name, df in frames(upload)) if s is not None]
+    link(tables)
+    sheets = [s for s in tables if any(pd.api.types.is_numeric_dtype(s.df[c]) for c in s.df.columns)]
     if not sheets:
         raise ValueError(f"I couldn't find a table with numbers in {upload.name}")
     return sheets
@@ -108,6 +138,12 @@ def frames(upload: Upload, as_typed: bool = False) -> list[tuple[str, pd.DataFra
     """Every tab as raw cells (no header, index = sheet row - 1, columns = position). Raises
     ValueError with a user-facing reason when the file can't be opened. `as_typed` keeps text
     such as "n/a" and "#DIV/0!" that pandas would otherwise turn into blanks (for the review)."""
+    if upload.parts:
+        out = []
+        for part in upload.parts:
+            tabs = frames(part, as_typed)
+            out += [(tab_name(part.name) if len(tabs) == 1 and part.mime not in (XLSX, XLSM) else name, df) for name, df in tabs]
+        return out
     if upload.mime == "application/vnd.ms-excel" and not upload.name.lower().endswith(".csv"):
         raise ValueError("old .xls workbooks aren't supported yet; save it as .xlsx or .csv and upload again")
     if upload.mime in (XLSX, XLSM):
@@ -118,7 +154,7 @@ def frames(upload: Upload, as_typed: bool = False) -> list[tuple[str, pd.DataFra
                 raw = {k: v.replace("", None) for k, v in raw.items()}
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"I couldn't open {upload.name} as an Excel workbook") from exc
-        frames = list(raw.items())
+        found = list(raw.items())
     else:
         text = upload.data.decode("utf-8-sig", "replace")
         try:
@@ -129,8 +165,8 @@ def frames(upload: Upload, as_typed: bool = False) -> list[tuple[str, pd.DataFra
         # read_csv would size the table from it.
         rows = [[c if c.strip() else None for c in r] for r in csv.reader(io.StringIO(text), delimiter=sep)]
         width = max((len(r) for r in rows), default=0)
-        frames = [(_stem(upload.name), pd.DataFrame([r + [None] * (width - len(r)) for r in rows], dtype=object))]
-    return frames
+        found = [(tab_name(upload.name), pd.DataFrame([r + [None] * (width - len(r)) for r in rows], dtype=object))]
+    return found
 
 
 def _stem(name: str) -> str:
@@ -268,7 +304,7 @@ def _melt_wide(df: pd.DataFrame) -> pd.DataFrame | None:
     return long.sort_values("Period", kind="stable").reset_index(drop=True)
 
 
-def tidy(name: str, raw: pd.DataFrame) -> Sheet | None:
+def tidy(name: str, raw: pd.DataFrame, numbers: bool = True) -> Sheet | None:
     raw = raw.dropna(how="all").dropna(axis=1, how="all")
     if raw.empty or len(raw) < 2:
         return None
@@ -304,9 +340,61 @@ def tidy(name: str, raw: pd.DataFrame) -> Sheet | None:
             continue
         n = _numeric(df[c])
         df[c] = n if n is not None else df[c].map(lambda v: str(v).strip() if pd.notna(v) else None)
-    if not any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns):
+    if numbers and not any(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns):
         return None
     return Sheet(name=str(name), df=df, notes=notes, wide=wide is not None)
+
+
+# ── Joining lookup tabs ──────────────────────────────────────────────────────
+
+_YES = {"yes", "y", "true", "1", "x"}
+
+
+def _norm(name) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _keys(col: pd.Series) -> pd.Series:
+    """Join keys as text, so 101 in one tab matches "101" in another."""
+    return col.map(lambda v: None if pd.isna(v) else str(int(v)) if isinstance(v, float) and v % 1 == 0 else str(v).strip())
+
+
+def link(tables: list[Sheet]) -> None:
+    """Join lookup tabs onto the tabs that point at them, like a star schema: Orders has a
+    ProductID, Products lists each ProductID once with its Category, so Orders gains Category.
+    A tab is a lookup for another when they share a column name, the lookup lists each key once,
+    it is no longer than the other tab and most of its keys appear there. A lookup that only flags
+    some keys (Returns: OrderID, Returned = Yes) fills the rest with No."""
+    for fact in tables:
+        for look in tables:
+            if look is fact or len(look.df) > len(fact.df):
+                continue
+            fcols = {_norm(c): c for c in fact.df.columns}
+            for key in look.df.columns:
+                fk = fcols.get(_norm(key))
+                if fk is None or pd.api.types.is_datetime64_any_dtype(look.df[key]):
+                    continue
+                lk = _keys(look.df[key])
+                if lk.isna().any() or not lk.is_unique or lk.nunique() < 2:
+                    continue
+                fkeys = _keys(fact.df[fk])
+                if lk.isin(set(fkeys.dropna())).mean() < 0.8 or (len(look.df) == len(fact.df) and fkeys.is_unique):
+                    continue
+                have = {_norm(c) for c in fact.df.columns}
+                add = [c for c in look.df.columns if c != key and _norm(c) not in have]
+                if not add:
+                    break
+                table = look.df[add].set_index(lk)
+                for c in add:
+                    col = fkeys.map(table[c])
+                    vals = look.df[c].dropna()
+                    if not pd.api.types.is_numeric_dtype(look.df[c]) and vals.nunique() == 1 and fkeys.isin(set(lk)).mean() < 0.95:
+                        col = col.fillna("No" if str(vals.iloc[0]).strip().lower() in _YES else f"Not {vals.iloc[0]}")
+                    fact.df[c] = col.values
+                shown = ", ".join(add[:4]) + (f" and {len(add) - 4} more" if len(add) > 4 else "")
+                fact.notes.append(f"Added {shown} from the {look.name} tab, matched on {fk}.")
+                fact.joined.append(look.name)
+                break
 
 
 # ── Column roles ─────────────────────────────────────────────────────────────
@@ -319,6 +407,7 @@ class Profile:
     time: str | None  # the date/period column
     grain: str | None  # "day", "month", "quarter", "year"
     span: str | None  # "Jan 2023 to Dec 2024"
+    label: str | None = None  # a text column naming each row (City, Customer), when there are not too many
 
     def summary(self) -> str:
         bits = []
@@ -329,6 +418,15 @@ class Profile:
         if self.dimensions:
             bits.append("categories " + ", ".join(f"**{d}**" for d in self.dimensions[:6]) + (" and more" if len(self.dimensions) > 6 else ""))
         return f"{self.rows:,} rows · " + " · ".join(bits)
+
+
+def _is_id(name: str) -> bool:
+    return bool(_ID_NAME.search(name) or re.search(r"[a-z]I[Dd]$", name))
+
+
+def _one_to_one(df: pd.DataFrame, a: str, b: str) -> bool:
+    pair = df[[a, b]].dropna().drop_duplicates()
+    return len(pair) == pair[a].nunique() == pair[b].nunique()
 
 
 def is_rate(measure: str) -> bool:
@@ -378,7 +476,7 @@ def profile(sheet: Sheet) -> Profile:
                     df[c] = pd.to_datetime(col.map(lambda y: f"{int(y)}-01-01" if pd.notna(y) else None))
                     time = c
                 continue
-            if _ID_NAME.search(c) or (ints and vals.is_unique and vals.is_monotonic_increasing and n > 20):
+            if _is_id(c) or (ints and vals.is_unique and vals.is_monotonic_increasing and n > 20):
                 continue
             measures.append(c)
         else:
@@ -387,10 +485,14 @@ def profile(sheet: Sheet) -> Profile:
                 dims.append(c)
     # Biggest-total amounts first: usually the headline number (Revenue before Discount).
     measures.sort(key=lambda m: (is_rate(m), -float(df[m].abs().sum())))
-    dims.sort(key=lambda d: (df[d].nunique() > 25, -min(df[d].nunique(), 12)))
+    # An ID that maps one to one onto a name (ProductID and ProductName, after a join) adds nothing.
+    dims = [d for d in dims if not (_is_id(d) and any(o != d and _one_to_one(df, d, o) for o in dims))]
+    dims.sort(key=lambda d: (_is_id(d), df[d].nunique() > 25, -min(df[d].nunique(), 12)))
     grain = span = None
     if time:
         grain = grain_of(df[time])
         t = df[time].dropna()
         span = f"{label(t.min(), grain)} to {label(t.max(), grain)}"
-    return Profile(rows=n, measures=measures, dimensions=dims, time=time, grain=grain, span=span)
+    named = next((c for c in df.columns if c != time and c not in measures and not pd.api.types.is_numeric_dtype(df[c])
+                  and 2 <= n <= MAX_LABEL_ROWS and df[c].notna().all() and df[c].is_unique), None)
+    return Profile(rows=n, measures=measures, dimensions=dims, time=time, grain=grain, span=span, label=named)
