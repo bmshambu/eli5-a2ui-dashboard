@@ -9,31 +9,53 @@ Agent Engine, A2UI v0.9).
 
 ## Interactive explorer (Power BI-style)
 
-The default view when a tab has a number and a category or date. One page in the side panel, everything
-filtered in the browser with no round trip to the agent:
+The default view when a tab has a number and a category. One page in the side panel, everything filtered in
+the browser with no round trip to the agent:
 
-- **Slicers**: a date range and a checklist per category column.
-- **Bubble chart**: one bubble per category (or per row when there is an ID column such as Customer ID),
-  growth against size by default, with quadrant lines at the medians and labels like "Big and growing".
-  Any number can go on x, y, size and colour.
-- **Heatmap**: category by period (or by a second category), with row totals.
-- **KPI tiles** and a **sortable table** for the same view.
-- **Cross-filter**: click a bubble, a heatmap cell or a table row and the other visuals filter to it; click
-  again to clear. The visual you clicked keeps showing everything so you can compare.
-- **Insights on every visual**: each one has its own "Insights for this view" panel (leader, quadrants,
-  correlation, outliers, hottest and coldest cells, unusual cells, steadiest and most volatile rows, spread)
-  that recomputes on every filter and click.
+- **Filters along the top**: a date range and a dropdown checklist per category.
+- **Four views on tabs**:
+  - **Bubbles**: Cut by / Y / X / Size / Colour, any number on any axis. Quadrants are named ("Big and
+    growing", "High spend, low tenure") and coloured by verdict, labels go only on the distinctive bubbles,
+    and you drag across the chart to zoom. A **ranked list** sits beside it.
+  - **Treemap**: blocks grouped by one category (for example Segment), cells by another (Customer ID),
+    sized by an amount and coloured by a score (a rate such as NPS, else growth).
+  - **Heatmap**: category by period, or by a second category.
+  - **Table**: sortable.
+- **"What this shows"** beside every view: the story of what is on screen (leader, quadrants, 80/20,
+  correlation, outliers, hottest cells), and when you hover a bubble, block or group heading, the story of
+  that one (rank, share of its group, how its score compares). A rich hover card shows the numbers.
+- **Cross-filter**: click a bubble, block, cell or row and everything else filters to it; click again to clear.
 - **Explain this view**: sends the current filters back to the agent, which re-runs the full analysis on
   just those rows and writes the story for them. The PDF button then exports that filtered view.
-
-Every view (explorer and the 7 chart styles) follows the device's light or dark setting by default, and an
-Auto / Light / Dark switch at the top lets the viewer override it, since GE's own theme can differ from the
-device's. Heatmap colours flip with the theme so low values stay close to the background.
 
 The page carries a pre-aggregated cube (at most 6,000 rows by category, period and up to 6 numbers), so it
 stays well under GE's 800 KB message limit on large sheets.
 
-![Interactive explorer](docs/explorer.png)
+Every view (explorer and the 7 chart styles) follows the device's light or dark setting by default, and an
+Auto / Light / Dark switch at the top lets the viewer override it, since GE's own theme can differ from the
+device's. Heatmap and treemap colours flip with the theme so low values stay close to the background.
+
+![Interactive explorer: bubbles](docs/explorer.png)
+
+![Interactive explorer: treemap](docs/explorer-treemap.png)
+
+## File check before charting
+
+Every upload card has a **Review my file** button, with a one-line hint of what the check found. The check
+opens in the side panel and goes tab by tab:
+
+- **Fix** (red): problems that stop a chart or make a number wrong, such as a column with values but no header,
+  a second table below a blank row, formula errors (`#DIV/0!`, `#N/A`) and number columns where too many cells
+  aren't numbers.
+- **Worth a look** (amber): things the charts work around, such as cells that aren't numbers (left out),
+  the same category spelled two ways, repeated headers, many blank cells and exact duplicate rows.
+- **Tidied for you** (grey): title rows above the table, total rows left out, month columns turned into a series.
+
+Each item names the cell (`D14`, or a line number for CSV) and says how to fix it in Excel. Each tab also lists
+the views it can show now and what to add to unlock more (a date column, a text column, a second number). Typing
+"check my file" does the same. Files the agent can't chart at all get the button on the error card.
+
+![File check](docs/file-check.png)
 
 ## What it does that Excel doesn't
 
@@ -41,7 +63,7 @@ Excel draws the numbers you select. This agent reads the whole tab and works out
 
 | | |
 |---|---|
-| **Interactive explorer** | bubble chart, heatmap, KPIs and table with slicers and click-to-filter; live insights per visual |
+| **Interactive explorer** | bubbles, treemap, heatmap and table with filters, click-to-filter, zoom and a live "What this shows" panel |
 | **Trend + forecast** | trend line, 3-period rolling average, a 3-period forecast with a 95% range; peak, low and biggest move marked |
 | **Ranked drivers (80/20)** | ranked bars with running share; the few items that make 80% of the total highlighted |
 | **Change bridge** | waterfall from the first to the last period: how much each category added or took away |
@@ -100,10 +122,11 @@ Typed shortcuts work at any point: *"show revenue by product as a heatmap"*, *"u
 | `agent/sheets.py` | reading .xlsx/.csv from the GE turn, tidying, column roles (`profile`) |
 | `agent/analysis.py` | facts, KPIs and chart data per style |
 | `agent/charts.py` | the 7 chart styles as inline SVG/HTML |
-| `agent/explorer.py` | the interactive explorer: page, cube JSON and the in-frame JS (filters, visuals, per-visual insights) |
+| `agent/explorer.py` | the interactive explorer: page, cube JSON and the in-frame JS (filters, four views, side story, hover cards, zoom) |
 | `agent/page.py` | the self-contained dashboard page (Canvas + IFrameSrcdoc) |
 | `agent/llm.py`, `agent/schema.py` | the narrative call, number grounding, facts-only fallback |
 | `agent/render.py` | A2UI cards: welcome, tab picker, style picker, dashboard, error |
+| `agent/review.py` | the upfront file check: findings per tab with cell references and fixes, and its page |
 | `agent/pdf.py` | the PDF report (reportlab) |
 | `agent/a2ui.py`, `agent/validate.py`, `agent/schemas/` | from the boilerplate: v0.9 helpers and offline validation against the GE catalog |
 | `agent/probe*.py`, `PROBE.md` | from the boilerplate: `AGENT_MODE=probe` tenant probe |

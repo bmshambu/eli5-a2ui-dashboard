@@ -97,7 +97,7 @@ class Analysis:
 
 def available(p: Profile) -> dict[str, bool]:
     t, d, m = bool(p.time), bool(p.dimensions), len(p.measures)
-    return {"auto": m > 0, "explore": m > 0 and (d or t), "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
+    return {"auto": m > 0, "explore": m > 0 and d, "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
             "heatmap": d and m > 0 and (t or len(p.dimensions) > 1), "multiples": t and d and m > 0,
             "scatter": m > 1, "distribution": m > 0}
 
@@ -211,6 +211,10 @@ def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: 
             filters: dict | None = None) -> Analysis:
     p = profile(sheet)
     if not p.measures:
+        if len(sheet.df) < 2:
+            raise ValueError(f"the {sheet.name} tab has only one row of data, so there is nothing to compare")
+        if any(pd.api.types.is_numeric_dtype(sheet.df[c]) for c in sheet.df.columns if c != p.time):
+            raise ValueError(f"every number column in the {sheet.name} tab holds the same value in every row, so there is nothing to compare")
         raise ValueError(f"the {sheet.name} tab has no number columns to chart")
     df, used, described = apply_filters(sheet.df, p, filters)
     measure = measure if measure in p.measures else p.measures[0]
@@ -424,7 +428,7 @@ def _anomaly_facts(f: _Facts, a: Analysis, df: pd.DataFrame, p: Profile, measure
         return
     z = d.groupby([d[k].astype(str) for k in keys])[measure].transform(_robust_z) if keys else _robust_z(d[measure])
     med = d.groupby([d[k].astype(str) for k in keys])[measure].transform("median") if keys else d[measure].median()
-    ratio = (d[measure] / med).where(med != 0)
+    ratio = (d[measure] / med).where(pd.Series(med, index=d.index) != 0)  # med is a scalar when there are no peer groups
     out = z[(z.abs() > 5) & ((ratio >= 2) | (ratio <= 0.4))].abs().sort_values(ascending=False)
     if out.empty:
         f.add("anomaly", f"No single row of {measure} is far out of line with its peers (none beyond 5 robust standard deviations).", 0.5)
@@ -703,6 +707,19 @@ def cube(base: pd.DataFrame, p: Profile) -> dict:
             "measures": [{"name": m, "rate": is_rate(m)} for m in measures], "rows": rows}
 
 
+def _treemap_defaults(dims: list, ms: list, plain: list[int], ident: int | None, m0: int, has_time: bool) -> dict:
+    """Blocks grouped by the coarsest category, cells by the finest (or one per row), sized by the
+    main amount and coloured by a score: a rate if there is one, else growth, else a second number."""
+    by_size = sorted(plain, key=lambda i: len(dims[i]["values"]))
+    group = by_size[0] if len(by_size) >= 2 or (by_size and ident is not None) else None
+    cell = next((i for i in reversed(by_size) if i != group), ident if ident is not None else (by_size[0] if by_size else 0))
+    size = f"m:{m0}:total" if not ms[m0]["rate"] else "rows"
+    rate = next((i for i, m in enumerate(ms) if m["rate"] and i != m0), None)
+    other = next((i for i in range(len(ms)) if i != m0), None)
+    color = f"m:{rate}:avg" if rate is not None else f"m:{m0}:growth" if has_time else f"m:{other}:avg" if other is not None else "group"
+    return {"tmGroup": group, "tmCell": cell, "tmSize": size, "tmColor": color}
+
+
 def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
     base = a.base
     partial = _partial_period(base, p) if p.time else None
@@ -723,6 +740,8 @@ def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
         x, y, sz = f"m:{m0}:growth", f"m:{m0}:total", f"m:{m1}:total" if m1 is not None else "rows"
     else:  # no dates: two numbers against each other, a third as bubble size
         x = f"m:{m1}:avg" if m1 is not None else "rows"
+        if x == "rows" and not ms[m0]["rate"] and base[names[detail]].is_unique:
+            x = f"m:{m0}:share"  # one row per bubble: a row count would stack every bubble on one line
         y = f"m:{m0}:avg" if detail == ident else f"m:{m0}:total"
         sz = f"m:{m2}:avg" if m2 is not None else "rows"
     color = plain[0] if detail == ident and plain else detail
@@ -739,7 +758,8 @@ def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
         init["from"] = next((i for i, t in enumerate(iso) if lo and t >= lo), None) if lo else None
         init["to"] = max((i for i, t in enumerate(iso) if hi and t <= hi), default=None) if hi else None
     a.chart.update({"type": "explore", "cube": c, "init": init,
-                    "defaults": {"detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0}})
+                    "defaults": {"detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0,
+                                 **_treemap_defaults(dims, ms, plain, ident, m0, bool(p.time))}})
     _quadrant_fact(f, a, df, p)
     if a.dim:
         cats = by_cat(df, a.dim, a.measure, a.agg)

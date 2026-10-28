@@ -1,9 +1,11 @@
 import asyncio
+import io
 import json
 import pathlib
 import re
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from google.adk.runners import InMemoryRunner
@@ -59,7 +61,7 @@ def test_period_of(raw, expected):
     assert (got.strftime("%Y-%m-%d") if got is not None else None) == expected
 
 
-@pytest.mark.parametrize("raw,expected", [("£1,200", 1200), ("(300)", -300), ("12%", 12), ("1.5k", 1500), ("USD40", 40), ("abc", None), (True, None)])
+@pytest.mark.parametrize("raw,expected", [("£1,200", 1200), ("(300)", -300), ("12%", 12), ("1.5k", 1500), ("USD40", 40), ("18°C", 18), ("-3.5°F", -3.5), ("abc", None), (True, None)])
 def test_to_number(raw, expected):
     assert sheets.to_number(raw) == expected
 
@@ -292,6 +294,15 @@ def _explorer_data(html_: str) -> dict:
     return json.loads(m.group(1).replace("<\\/", "</"))
 
 
+def test_treemap_groups_by_the_coarse_category_and_colours_by_a_score(tabs):
+    a = analysis.analyze(_tab(tabs, "Customers"), "explore")
+    d, dims = a.chart["defaults"], a.chart["cube"]["dims"]
+    assert dims[d["tmGroup"]]["name"] == "Segment" and dims[d["tmCell"]]["name"] == "Customer ID"
+    assert a.chart["cube"]["measures"][int(d["tmColor"].split(":")[1])]["name"] == "NPS score"
+    sales = analysis.analyze(_tab(tabs, "Monthly Sales"), "explore").chart
+    assert sales["cube"]["dims"][sales["defaults"]["tmGroup"]]["name"] == "Product"  # 4 products group 5 regions
+
+
 def test_auto_picks_the_explorer_when_there_are_categories(tabs):
     for name in ("Monthly Sales", "Spend by Dept", "Customers"):
         assert analysis.analyze(_tab(tabs, name)).style == "explore"
@@ -311,8 +322,11 @@ def test_explorer_cube_page_validates_and_fits(tabs, tab):
     for key in ("x", "y", "size"):  # every default metric is one the page offers
         mid = d[key]
         assert mid == "rows" or int(mid.split(":")[1]) < len(cube["measures"])
-    for vid in ("ex-bins", "ex-hins", "ex-tins", "ex-kins"):  # an insight panel per visual
+    for vid in ("ex-v-bubble", "ex-v-tree", "ex-v-heat", "ex-v-table", "ex-side", "ex-rank", "ex-card"):  # four views, side story, ranked list
         assert f'id="{vid}"' in html_
+    dims = cube["dims"]
+    assert d["tmCell"] < len(dims) and (d["tmGroup"] is None or (d["tmGroup"] < len(dims) and d["tmGroup"] != d["tmCell"]))
+    assert d["tmSize"] == "rows" or not cube["measures"][int(d["tmSize"].split(":")[1])]["rate"]  # blocks are sized by an amount
 
 
 def test_cube_totals_match_the_sheet(tabs):
@@ -360,3 +374,166 @@ def test_every_view_has_a_theme_switch_and_themed_heatmap_colours(tabs, style):
     assert all(f'data-t="{t}"' in html_ for t in ("auto", "light", "dark"))
     assert ":root[data-theme=dark]" in html_ and ":root:not([data-theme=light])" in html_
     assert not re.search(r'style="background:#', html_)  # cell colours come from the theme, not fixed hex
+
+
+def test_one_row_per_category_sheet_charts_in_every_style():
+    # A small weather sheet: every city is its own row, so there are no peer groups for anomalies.
+    df = pd.DataFrame({"city": ["London", "Paris", "Delhi", "Mumbai", "Tokyo", "Sydney", "Cairo", "Oslo"],
+                       "temperature highest": ["18°C", "21°C", "38°C", "33°C", "26°C", "24°C", "35°C", "9°C"],
+                       "temperature lowest": [9, 12, 27, 26, 18, 14, 22, 1],
+                       "humidity highest": ["88%", "80%", "60%", "90%", "75%", "70%", "40%", "85%"],
+                       "humidity lowest": [55, 50, 25, 70, 45, 40, 15, 60]})
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, sheet_name="Weather")
+    up = sheets.Upload("weather.xlsx", buf.getvalue(), sheets.XLSX)
+    sheet, = sheets.read(up)
+    assert set(sheets.profile(sheet).measures) == {"temperature highest", "temperature lowest", "humidity highest", "humidity lowest"}
+    for style in analysis.STYLES:
+        a = analysis.analyze(sheet, style)
+        validate.check(render.dashboard_card(a, llm.fallback(a), up.name))
+
+
+def _sheet_of(df: pd.DataFrame) -> sheets.Sheet:
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    sheet, = sheets.read(sheets.Upload("x.xlsx", buf.getvalue(), sheets.XLSX))
+    return sheet
+
+
+_rng = np.random.default_rng(1)
+_CITIES = ["London", "Paris", "Delhi", "Mumbai", "Tokyo", "Sydney", "Cairo", "Oslo", "Lima", "Rome", "Seoul", "Dubai"]
+SHAPES = {
+    "numbers only": pd.DataFrame({"a": _rng.normal(size=30), "b": _rng.normal(size=30)}),
+    "one number column": pd.DataFrame({"v": _rng.integers(1, 100, 40)}),
+    "dates and one number": pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-02-01"]), "v": [1, 2]}),
+    "year column": pd.DataFrame({"year": [2020, 2021, 2022, 2023], "v": [1, 4, 9, 16]}),
+    "one number per city": pd.DataFrame({"city": _CITIES, "v": _rng.integers(1, 50, 12)}),
+    "two rows": pd.DataFrame({"city": ["A", "B"], "v": [1, 2]}),
+    "gaps and text": pd.DataFrame({"city": _CITIES, "v": [1, None, 3, "n/a", 5, 6, "-", 8, 9, None, 11, 12], "w": [None] * 12}),
+    "single period": pd.DataFrame({"date": pd.to_datetime(["2024-01-01"] * 10), "city": _CITIES[:10], "v": range(10)}),
+}
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_unusual_sheet_shapes_chart_in_every_style(shape):
+    sheet = _sheet_of(SHAPES[shape])
+    for style in analysis.STYLES:
+        a = analysis.analyze(sheet, style)
+        messages = render.dashboard_card(a, llm.fallback(a), "x.xlsx")
+        validate.check(messages)  # e.g. no null values in button contexts when there is no category column
+        if a.style == "explore":
+            assert _explorer_data(page.page(a, llm.fallback(a), "x.xlsx"))["cube"]["dims"]
+
+
+@pytest.mark.parametrize("df,message", [
+    (pd.DataFrame({"city": ["London"], "v": [18]}), "only one row"),
+    (pd.DataFrame({"city": _CITIES, "v": [0] * 12}), "same value in every row"),
+])
+def test_sheets_with_nothing_to_compare_say_why(df, message):
+    with pytest.raises(ValueError, match=message):
+        analysis.analyze(_sheet_of(df))
+
+
+def test_title_above_the_table_does_not_leave_an_empty_column():
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "Weather report Q3"
+    ws.append([])
+    ws.append([None, "City", "Max temp", "Min temp"])
+    for row in [("London", 18, 9), ("Paris", 21, 12), ("Rome", 29, 19), ("Oslo", 9, 1)]:
+        ws.append([None, *row])
+    buf = io.BytesIO()
+    wb.save(buf)
+    sheet, = sheets.read(sheets.Upload("x.xlsx", buf.getvalue(), sheets.XLSX))
+    assert list(sheet.df.columns) == ["City", "Max temp", "Min temp"]
+
+
+# --- upfront file review ------------------------------------------------------------------
+
+def _messy_book() -> bytes:
+    import datetime as dt
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sales"
+    ws["A1"], ws["A2"] = "Q3 sales report", "Prepared by finance"
+    ws.append([])
+    ws.append(["Date", "Region", "Product", "Revenue", "Units", None, "Units"])
+    regions = ["North", "South", "East", "north ", "West"]
+    for i in range(40):
+        rev = {5: "n/a", 9: "#DIV/0!", 12: None}.get(i, 1000 + i * 37)
+        ws.append([dt.date(2024, 1 + i % 9, 1 + i % 27), regions[i % 5], "Alpha" if i % 2 else "Beta", rev, i % 7 + 1,
+                   3 if i % 4 == 0 else None, i])
+    ws.append(["2024-09-01", "South", "Beta", 1500, 2, None, 2])
+    ws.append(["2024-09-01", "South", "Beta", 1500, 2, None, 2])
+    ws.append(["Total", None, None, 99999, None, None, None])
+    ws.append([])
+    ws.append(["Target", "Owner"])
+    ws.append(["North", "Ann"])
+    wb.create_sheet("Notes")["A1"] = "Remember to update monthly"
+    wb.create_sheet("Blank")
+    ws3 = wb.create_sheet("Customers")
+    ws3.append(["Customer", "Spend"])
+    for i in range(10):
+        ws3.append([f"C{i}", 100 + i if i < 6 else f"x{i}"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+MESSY = sheets.Upload("sales_q3.xlsx", _messy_book(), sheets.XLSX)
+
+
+def test_review_points_at_cells_and_says_how_to_fix():
+    from agent import review
+    tabs = {t.name: t for t in review.review(MESSY)}
+    sales = [f.title for f in tabs["Sales"].findings]
+    want = ["Column F has values but no header", "2 columns are called “Units” (E, G)", "second table below the blank row 48",
+            "Revenue: 1 formula error (D14 “#DIV/0!”)", "Revenue: 1 cell isn't a number (D10 “n/a”)",
+            "(“North” / “north”)", "exact copy of an earlier row (row 46)", "table starts at row 4", "Left out 1 total row"]
+    for w in want:
+        assert any(w in t for t in sales), w
+    assert all(f.tip for f in tabs["Sales"].findings if f.level != "info")
+    assert tabs["Sales"].status == "fix" and tabs["Sales"].chartable
+    assert tabs["Blank"].status == "empty" and tabs["Notes"].status == "blocked"
+    assert tabs["Customers"].status == "blocked" and "read as text" in tabs["Customers"].findings[0].title
+    assert review.counts(list(tabs.values())) == (5, 4)
+
+
+def test_review_of_the_clean_sample_finds_nothing_to_fix():
+    from agent import review
+    tabs = review.review(BOOK)
+    assert review.counts(tabs)[0] == 0 and all(t.chartable for t in tabs)
+    assert "looks clean" in review.headline(BOOK.name, tabs) or "worth a look" in review.headline(BOOK.name, tabs)
+
+
+def test_review_of_a_csv_uses_line_numbers():
+    from agent import review
+    up = sheets.Upload("w.csv", b"city,temp\nLondon,18\nParis,n/a\nRome,29\nOslo,9\nLima,20\n", sheets.CSV)
+    t, = review.review(up)
+    assert any("line 3 “n/a”" in f.title for f in t.findings)
+
+
+def test_upload_offers_review_with_a_hint_and_review_opens_the_check(fake):
+    turns = _converse([_upload(MESSY), _click("review", {"prompt": "Review my file"}), _text("can you check my file?")])
+    first = _components(_messages(turns[0]))
+    assert first["review"]["action"]["event"]["name"] == "review"
+    assert "5 things to fix" in first["reviewd"]["text"]
+    for t in turns[1:]:
+        msgs = _messages(t)
+        validate.check(msgs)
+        comps = _components(msgs)
+        assert comps["root"]["component"] == "Canvas" and "Column F has values but no header" in comps["frame"]["htmlContent"]
+    assert not fake.calls  # the review needs no model call
+
+
+def test_file_with_no_numbers_offers_the_review():
+    up = sheets.Upload("names.csv", b"name,team\nAnn,Red\nBo,Blue\nCy,Red\n", sheets.CSV)
+    turns = _converse([_upload(up)])
+    comps = _components(_messages(turns[0]))
+    assert comps["review"]["action"]["event"]["name"] == "review"
+
+
+def test_welcome_card_validates():
+    validate.check(render.welcome_card())

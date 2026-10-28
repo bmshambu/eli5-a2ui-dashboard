@@ -98,11 +98,24 @@ class Sheet:
 
 def read(upload: Upload) -> list[Sheet]:
     """Every tab with numbers in it, tidied. Raises ValueError with a user-facing reason."""
+    sheets = [s for s in (tidy(name, df) for name, df in frames(upload)) if s is not None]
+    if not sheets:
+        raise ValueError(f"I couldn't find a table with numbers in {upload.name}")
+    return sheets
+
+
+def frames(upload: Upload, as_typed: bool = False) -> list[tuple[str, pd.DataFrame]]:
+    """Every tab as raw cells (no header, index = sheet row - 1, columns = position). Raises
+    ValueError with a user-facing reason when the file can't be opened. `as_typed` keeps text
+    such as "n/a" and "#DIV/0!" that pandas would otherwise turn into blanks (for the review)."""
     if upload.mime == "application/vnd.ms-excel" and not upload.name.lower().endswith(".csv"):
         raise ValueError("old .xls workbooks aren't supported yet; save it as .xlsx or .csv and upload again")
     if upload.mime in (XLSX, XLSM):
         try:
-            raw = pd.read_excel(io.BytesIO(upload.data), sheet_name=None, header=None, engine="openpyxl")
+            raw = pd.read_excel(io.BytesIO(upload.data), sheet_name=None, header=None, engine="openpyxl",
+                                **({"keep_default_na": False, "na_values": []} if as_typed else {}))
+            if as_typed:
+                raw = {k: v.replace("", None) for k, v in raw.items()}
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"I couldn't open {upload.name} as an Excel workbook") from exc
         frames = list(raw.items())
@@ -117,10 +130,7 @@ def read(upload: Upload) -> list[Sheet]:
         rows = [[c if c.strip() else None for c in r] for r in csv.reader(io.StringIO(text), delimiter=sep)]
         width = max((len(r) for r in rows), default=0)
         frames = [(_stem(upload.name), pd.DataFrame([r + [None] * (width - len(r)) for r in rows], dtype=object))]
-    sheets = [s for s in (tidy(name, df) for name, df in frames) if s is not None]
-    if not sheets:
-        raise ValueError(f"I couldn't find a table with numbers in {upload.name}")
-    return sheets
+    return frames
 
 
 def _stem(name: str) -> str:
@@ -167,7 +177,7 @@ def _names(values) -> list[str]:
 
 
 def to_number(v):
-    """12, '1,234', '£1.2k', '(300)', '12%' -> float, else None."""
+    """12, '1,234', '£1.2k', '(300)', '12%', '18°C' -> float, else None."""
     if v is None or isinstance(v, bool) or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, (int, float)):
@@ -178,6 +188,7 @@ def to_number(v):
     neg = s.startswith("(") and s.endswith(")")
     s = s.strip("()").replace(",", "").replace(" ", "")
     s = re.sub(r"^[£$€¥₹]|^[A-Z]{3}(?=\d)", "", s).rstrip("%")
+    s = re.sub(r"°[CF]?$", "", s, flags=re.I)  # temperatures
     mult = 1.0
     if re.fullmatch(r"-?\d+(\.\d+)?[kmbKMB]", s):
         mult = {"k": 1e3, "m": 1e6, "b": 1e9}[s[-1].lower()]
@@ -268,6 +279,8 @@ def tidy(name: str, raw: pd.DataFrame) -> Sheet | None:
     df = raw.iloc[h + 1:].copy()
     df.columns = _names(raw.iloc[h].tolist())
     df = df.dropna(how="all").reset_index(drop=True)
+    # A column that only held a title above the table is empty below it.
+    df = df[[c for c in df.columns if not (c.startswith("Column ") and df[c].isna().all())]]
     if len(df) > MAX_ROWS:
         notes.append(f"Used the first {MAX_ROWS:,} of {len(df):,} rows.")
         df = df.head(MAX_ROWS)
