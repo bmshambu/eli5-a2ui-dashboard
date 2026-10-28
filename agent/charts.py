@@ -10,6 +10,7 @@ the accessible and exact view.
 import html
 import math
 
+from . import explorer
 from .analysis import num, pct
 
 W, H = 760, 340
@@ -329,6 +330,8 @@ def distribution(c: dict, measure: str) -> str:
 def draw(a) -> str:
     c = a.chart
     t = c["type"]
+    if t == "explore":
+        return explorer.render(a)
     if t == "trend":
         return trend(c, a.measure)
     if t == "pareto":

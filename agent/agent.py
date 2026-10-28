@@ -14,6 +14,7 @@ Later turns reuse the latest upload in the session events, so clicks need no re-
 AGENT_MODE=probe serves the step 0 probe (see PROBE.md).
 """
 import hashlib
+import json
 import logging
 import os
 import re
@@ -125,11 +126,13 @@ def styles_reply(up: sheets.Upload, sheet: sheets.Sheet) -> Reply:
 
 
 async def chart(up: sheets.Upload, sheet: sheets.Sheet, style: str = "auto", measure: str | None = None,
-                dim: str | None = None, focus: str | None = None) -> Reply:
+                dim: str | None = None, focus: str | None = None, filters: dict | None = None) -> Reply:
     """The dashboard: computed analysis, then the narrative (model, or facts-only on failure)."""
     retry = {"sheet": sheet.name, "style": style, "measure": measure, "dim": dim, "prompt": f"Show {sheet.name} again"}
+    if filters:
+        retry["filters"] = filters
     try:
-        a = analysis.analyze(sheet, style if style in STYLES else "auto", measure, dim)
+        a = analysis.analyze(sheet, style if style in STYLES else "auto", measure, dim, filters)
     except Exception as exc:  # noqa: BLE001  (the user gets a message, not a broken turn)
         log.exception("analysis failed for %s/%s", sheet.name, style)
         reason = str(exc) if isinstance(exc, ValueError) else "something in this tab tripped me up"
@@ -150,12 +153,23 @@ async def chart(up: sheets.Upload, sheet: sheets.Sheet, style: str = "auto", mea
                  messages, remember)
 
 
+def _filters(ctx: dict | None) -> dict | None:
+    """The explorer's filters from an action context or the last dashboard, if they look right."""
+    f = (ctx or {}).get("filters")
+    if isinstance(f, str):  # A2UI buttons carry it as JSON; the explorer posts it as an object
+        try:
+            f = json.loads(f)
+        except ValueError:
+            return None
+    return f if isinstance(f, dict) and f else None
+
+
 def pdf_reply(up: sheets.Upload, tabs: list[sheets.Sheet], ctx: dict, last: dict | None) -> Reply:
     sheet = _sheet(tabs, ctx.get("sheet"))
     if sheet is None:
         return Reply("Sorry, I couldn't find that tab any more. Upload the file again.", [])
     try:
-        a = analysis.analyze(sheet, ctx.get("style") or "auto", ctx.get("measure"), ctx.get("dim"))
+        a = analysis.analyze(sheet, ctx.get("style") or "auto", ctx.get("measure"), ctx.get("dim"), _filters(ctx))
         same = last and last.get("file") == up.name and all(last.get(k) == v for k, v in a.meta().items())
         n = Narrative.model_validate(last["narrative"]) if same else llm.fallback(a)
         data = pdf.build(a, n, up.name)
@@ -195,7 +209,7 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
         sheet = _sheet(tabs, ctx.get("sheet"))
         if sheet is None:
             return tabs_reply(up, tabs)
-        return await chart(up, sheet, ctx.get("style") or "auto", ctx.get("measure"), ctx.get("dim"))
+        return await chart(up, sheet, ctx.get("style") or "auto", ctx.get("measure"), ctx.get("dim"), filters=_filters(ctx))
 
     # Typed text, or the prompt of an "Ask next" chip (which also carries the chart it came from).
     base = ctx if name == render.ASK_ACTION else (None if fresh else last)
@@ -220,7 +234,8 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
                        style or (base.get("style") if same_sheet else None) or "auto",
                        measure or (base.get("measure") if same_sheet else None),
                        dim or (base.get("dim") if same_sheet else None),
-                       focus=None if command else text)
+                       focus=None if command else text,
+                       filters=_filters(base) if same_sheet and not style_in(text) else None)
 
 
 class SheetInsightsAgent(BaseAgent):

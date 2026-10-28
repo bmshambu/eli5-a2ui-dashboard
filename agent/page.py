@@ -9,7 +9,7 @@ Chips post {type:'a2ui_action'} to the parent; GE delivers them to the agent lik
 import html
 import json
 
-from . import charts
+from . import charts, explorer
 from .analysis import STYLES, Analysis, available
 from .schema import Narrative
 
@@ -159,6 +159,8 @@ def chart_title(a: Analysis) -> tuple[str, str]:
     c = a.chart
     g = a.prof.grain or "period"
     word = "average" if a.agg == "mean" else "total"
+    if a.style == "explore":
+        return explorer.title(a)
     return {
         "trend": (f"{a.measure} by {g}, with trend and forecast", f"{word.capitalize()} per {g}. Hover any point for the value and its change."),
         "pareto": (f"{a.measure} by {a.dim}, ranked", "Blue bars are the few items that together make 80% of the total."),
@@ -215,7 +217,7 @@ def page(a: Analysis, n: Narrative, file: str) -> str:
 <div class="eyebrow">{_e(file)} · {_e(a.sheet)} tab · {a.prof.rows:,} rows</div>
 <h1>{_e(n.headline)}</h1><p class="summary">{_e(n.summary)}</p>
 <div class="controls">{controls}</div>
-<section class="kpis">{kpis}</section>
+{"" if a.style == "explore" else f'<section class="kpis">{kpis}</section>'}
 {heads}<section class="card"><h2>{_e(title)}</h2><p class="sub">{_e(sub)}</p>{charts.draw(a)}{_table(a.table)}</section>
 <section class="insights">{"".join(cards)}</section>
 <section class="two"><div class="card"><h2>What to do next</h2><ol>{actions}</ol></div>
