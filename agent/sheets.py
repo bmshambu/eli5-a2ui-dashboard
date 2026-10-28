@@ -98,11 +98,24 @@ class Sheet:
 
 def read(upload: Upload) -> list[Sheet]:
     """Every tab with numbers in it, tidied. Raises ValueError with a user-facing reason."""
+    sheets = [s for s in (tidy(name, df) for name, df in frames(upload)) if s is not None]
+    if not sheets:
+        raise ValueError(f"I couldn't find a table with numbers in {upload.name}")
+    return sheets
+
+
+def frames(upload: Upload, as_typed: bool = False) -> list[tuple[str, pd.DataFrame]]:
+    """Every tab as raw cells (no header, index = sheet row - 1, columns = position). Raises
+    ValueError with a user-facing reason when the file can't be opened. `as_typed` keeps text
+    such as "n/a" and "#DIV/0!" that pandas would otherwise turn into blanks (for the review)."""
     if upload.mime == "application/vnd.ms-excel" and not upload.name.lower().endswith(".csv"):
         raise ValueError("old .xls workbooks aren't supported yet; save it as .xlsx or .csv and upload again")
     if upload.mime in (XLSX, XLSM):
         try:
-            raw = pd.read_excel(io.BytesIO(upload.data), sheet_name=None, header=None, engine="openpyxl")
+            raw = pd.read_excel(io.BytesIO(upload.data), sheet_name=None, header=None, engine="openpyxl",
+                                **({"keep_default_na": False, "na_values": []} if as_typed else {}))
+            if as_typed:
+                raw = {k: v.replace("", None) for k, v in raw.items()}
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"I couldn't open {upload.name} as an Excel workbook") from exc
         frames = list(raw.items())
@@ -117,10 +130,7 @@ def read(upload: Upload) -> list[Sheet]:
         rows = [[c if c.strip() else None for c in r] for r in csv.reader(io.StringIO(text), delimiter=sep)]
         width = max((len(r) for r in rows), default=0)
         frames = [(_stem(upload.name), pd.DataFrame([r + [None] * (width - len(r)) for r in rows], dtype=object))]
-    sheets = [s for s in (tidy(name, df) for name, df in frames) if s is not None]
-    if not sheets:
-        raise ValueError(f"I couldn't find a table with numbers in {upload.name}")
-    return sheets
+    return frames
 
 
 def _stem(name: str) -> str:

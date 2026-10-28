@@ -435,3 +435,93 @@ def test_title_above_the_table_does_not_leave_an_empty_column():
     wb.save(buf)
     sheet, = sheets.read(sheets.Upload("x.xlsx", buf.getvalue(), sheets.XLSX))
     assert list(sheet.df.columns) == ["City", "Max temp", "Min temp"]
+
+
+# --- upfront file review ------------------------------------------------------------------
+
+def _messy_book() -> bytes:
+    import datetime as dt
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sales"
+    ws["A1"], ws["A2"] = "Q3 sales report", "Prepared by finance"
+    ws.append([])
+    ws.append(["Date", "Region", "Product", "Revenue", "Units", None, "Units"])
+    regions = ["North", "South", "East", "north ", "West"]
+    for i in range(40):
+        rev = {5: "n/a", 9: "#DIV/0!", 12: None}.get(i, 1000 + i * 37)
+        ws.append([dt.date(2024, 1 + i % 9, 1 + i % 27), regions[i % 5], "Alpha" if i % 2 else "Beta", rev, i % 7 + 1,
+                   3 if i % 4 == 0 else None, i])
+    ws.append(["2024-09-01", "South", "Beta", 1500, 2, None, 2])
+    ws.append(["2024-09-01", "South", "Beta", 1500, 2, None, 2])
+    ws.append(["Total", None, None, 99999, None, None, None])
+    ws.append([])
+    ws.append(["Target", "Owner"])
+    ws.append(["North", "Ann"])
+    wb.create_sheet("Notes")["A1"] = "Remember to update monthly"
+    wb.create_sheet("Blank")
+    ws3 = wb.create_sheet("Customers")
+    ws3.append(["Customer", "Spend"])
+    for i in range(10):
+        ws3.append([f"C{i}", 100 + i if i < 6 else f"x{i}"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+MESSY = sheets.Upload("sales_q3.xlsx", _messy_book(), sheets.XLSX)
+
+
+def test_review_points_at_cells_and_says_how_to_fix():
+    from agent import review
+    tabs = {t.name: t for t in review.review(MESSY)}
+    sales = [f.title for f in tabs["Sales"].findings]
+    want = ["Column F has values but no header", "2 columns are called “Units” (E, G)", "second table below the blank row 48",
+            "Revenue: 1 formula error (D14 “#DIV/0!”)", "Revenue: 1 cell isn't a number (D10 “n/a”)",
+            "(“North” / “north”)", "exact copy of an earlier row (row 46)", "table starts at row 4", "Left out 1 total row"]
+    for w in want:
+        assert any(w in t for t in sales), w
+    assert all(f.tip for f in tabs["Sales"].findings if f.level != "info")
+    assert tabs["Sales"].status == "fix" and tabs["Sales"].chartable
+    assert tabs["Blank"].status == "empty" and tabs["Notes"].status == "blocked"
+    assert tabs["Customers"].status == "blocked" and "read as text" in tabs["Customers"].findings[0].title
+    assert review.counts(list(tabs.values())) == (5, 4)
+
+
+def test_review_of_the_clean_sample_finds_nothing_to_fix():
+    from agent import review
+    tabs = review.review(BOOK)
+    assert review.counts(tabs)[0] == 0 and all(t.chartable for t in tabs)
+    assert "looks clean" in review.headline(BOOK.name, tabs) or "worth a look" in review.headline(BOOK.name, tabs)
+
+
+def test_review_of_a_csv_uses_line_numbers():
+    from agent import review
+    up = sheets.Upload("w.csv", b"city,temp\nLondon,18\nParis,n/a\nRome,29\nOslo,9\nLima,20\n", sheets.CSV)
+    t, = review.review(up)
+    assert any("line 3 “n/a”" in f.title for f in t.findings)
+
+
+def test_upload_offers_review_with_a_hint_and_review_opens_the_check(fake):
+    turns = _converse([_upload(MESSY), _click("review", {"prompt": "Review my file"}), _text("can you check my file?")])
+    first = _components(_messages(turns[0]))
+    assert first["review"]["action"]["event"]["name"] == "review"
+    assert "5 things to fix" in first["reviewd"]["text"]
+    for t in turns[1:]:
+        msgs = _messages(t)
+        validate.check(msgs)
+        comps = _components(msgs)
+        assert comps["root"]["component"] == "Canvas" and "Column F has values but no header" in comps["frame"]["htmlContent"]
+    assert not fake.calls  # the review needs no model call
+
+
+def test_file_with_no_numbers_offers_the_review():
+    up = sheets.Upload("names.csv", b"name,team\nAnn,Red\nBo,Blue\nCy,Red\n", sheets.CSV)
+    turns = _converse([_upload(up)])
+    comps = _components(_messages(turns[0]))
+    assert comps["review"]["action"]["event"]["name"] == "review"
+
+
+def test_welcome_card_validates():
+    validate.check(render.welcome_card())

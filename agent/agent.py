@@ -25,7 +25,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 from google.genai import types as genai_types
 
-from . import a2ui, analysis, llm, pdf, render, sheets, validate
+from . import a2ui, analysis, llm, pdf, render, review, sheets, validate
 from .analysis import STYLES
 from .schema import Narrative
 
@@ -35,6 +35,8 @@ STATE_KEY = "dash_last"  # {"file", "sheet", "style", "measure", "dim", "narrati
 MAX_TEXT = 500
 
 _GREETING = re.compile(r"^(hi|hello|hey|help|start|menu|what can you do\??|who are you\??)[!. ]*$", re.I)
+_REVIEW = re.compile(r"\b(?:review|check|validate|verify|pre-?check|audit)\b.{0,25}\b(?:file|sheet|spreadsheet|excel|workbook|data|upload)\b"
+                     r"|\bwhat(?:'s| is) (?:wrong|missing)\b|^\W*review\W*$", re.I)
 _TABS = re.compile(r"\b(?:other|another|different|switch|change|show|list|which|all)\b.{0,20}\b(?:tabs?|sheets?)\b|^\W*(?:tabs?|sheets?)\W*$", re.I)
 # Checked in order: "small multiples" before "multiples", heatmap's "grid" before anything else.
 _STYLE_WORDS = (
@@ -113,16 +115,44 @@ class Reply(NamedTuple):
     files: tuple = ()  # file parts, e.g. the PDF
 
 
-def tabs_reply(up: sheets.Upload, tabs: list[sheets.Sheet]) -> Reply:
+def review_hint(up: sheets.Upload) -> str | None:
+    """One line under the Review button after an upload: how many things the check found."""
+    try:
+        fixes, checks = review.counts(review.review(up))
+    except Exception:  # noqa: BLE001  (the hint is a nicety; never block the upload on it)
+        log.exception("review hint failed for %s", up.name)
+        return None
+    if fixes:
+        return f"I spotted {fixes} thing{'s' if fixes != 1 else ''} to fix" + (f" and {checks} to check" if checks else "") \
+            + ". Review before charting to see where."
+    if checks:
+        return f"Charts will work. {checks} thing{'s' if checks != 1 else ''} worth a look before you share them."
+    return "Nothing to fix: the file looks clean."
+
+
+def review_reply(up: sheets.Upload) -> Reply:
+    try:
+        tabs = review.review(up)
+        messages = render.review_card(up.name, tabs)
+        validate.check(messages)
+    except ValueError as exc:
+        return Reply(f"Sorry, {exc}.", render.error_card(f"Sorry, {exc}."))
+    except Exception:  # noqa: BLE001
+        log.exception("review failed for %s", up.name)
+        return Reply("Sorry, I couldn't check that file.", render.error_card(f"I couldn't check **{up.name}**. Is it a normal .xlsx or .csv file?"))
+    return Reply(f"**{review.headline(up.name, tabs)}.** The full check is open in the side panel.", messages)
+
+
+def tabs_reply(up: sheets.Upload, tabs: list[sheets.Sheet], hint: str | None = None) -> Reply:
     if len(tabs) == 1:
-        return styles_reply(up, tabs[0])
+        return styles_reply(up, tabs[0], hint)
     return Reply(f"**{up.name}** has {len(tabs)} tabs with numbers. Which one should I chart?",
-                 render.tabs_card(up.name, [(t.name, sheets.profile(t)) for t in tabs]))
+                 render.tabs_card(up.name, [(t.name, sheets.profile(t)) for t in tabs], hint))
 
 
-def styles_reply(up: sheets.Upload, sheet: sheets.Sheet) -> Reply:
+def styles_reply(up: sheets.Upload, sheet: sheets.Sheet, hint: str | None = None) -> Reply:
     return Reply(f"Pick a chart style for the **{sheet.name}** tab, or tell me what you want to see.",
-                 render.styles_card(up.name, sheet.name, sheets.profile(sheet), sheet.notes))
+                 render.styles_card(up.name, sheet.name, sheets.profile(sheet), sheet.notes, hint))
 
 
 async def chart(up: sheets.Upload, sheet: sheets.Sheet, style: str = "auto", measure: str | None = None,
@@ -190,10 +220,13 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
     text = _user_text(content) if action is None else str(ctx.get("prompt") or "") if name == render.ASK_ACTION else ""
     if up is None:
         return Reply("Upload an Excel or CSV file and I'll chart it with insights.", render.welcome_card())
+    if name == render.REVIEW_ACTION or (action is None and _REVIEW.search(text)):
+        return review_reply(up)
     try:
         tabs = workbook(up)
     except ValueError as exc:
-        return Reply(f"Sorry, {exc}.", render.error_card(f"Sorry, {exc}."))
+        return Reply(f"Sorry, {exc}.", render.error_card(f"Sorry, {exc}.", review_file="couldn't open" not in str(exc)
+                                                         and "aren't supported" not in str(exc)))
     except Exception:  # noqa: BLE001
         log.exception("could not read %s", up.name)
         return Reply("Sorry, I couldn't read that file.", render.error_card(f"I couldn't read **{up.name}**. Is it a normal .xlsx or .csv file?"))
@@ -215,20 +248,21 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
     base = ctx if name == render.ASK_ACTION else (None if fresh else last)
     if base and base.get("file", up.name) != up.name:
         base = None
+    hint = review_hint(up) if fresh else None
     if not text or _GREETING.match(text):
-        return tabs_reply(up, tabs)
+        return tabs_reply(up, tabs, hint)
     if _TABS.search(text):
-        return tabs_reply(up, tabs)
+        return tabs_reply(up, tabs, hint)
     sheet = sheet_in(text, tabs) or (_sheet(tabs, base.get("sheet")) if base else None) or (tabs[0] if len(tabs) == 1 else None)
     if sheet is None:
-        return tabs_reply(up, tabs)
+        return tabs_reply(up, tabs, hint)
     style = style_in(text)
     prof = sheets.profile(sheet)
     measure = _find(prof.measures, text)
     dim = _find(prof.dimensions, text, prefer_after="by")
     same_sheet = base and base.get("sheet") == sheet.name
     if fresh and style is None and measure is None and dim is None and not text.rstrip().endswith("?"):
-        return styles_reply(up, sheet)  # "here's my file, use the Sales tab" -> pick a style
+        return styles_reply(up, sheet, hint)  # "here's my file, use the Sales tab" -> pick a style
     command = style is not None or (sheet_in(text, tabs) is not None and not text.rstrip().endswith("?"))
     return await chart(up, sheet,
                        style or (base.get("style") if same_sheet else None) or "auto",

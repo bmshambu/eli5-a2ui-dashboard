@@ -35,6 +35,24 @@ stays well under GE's 800 KB message limit on large sheets.
 
 ![Interactive explorer](docs/explorer.png)
 
+## File check before charting
+
+Every upload card has a **Review my file** button, with a one-line hint of what the check found. The check
+opens in the side panel and goes tab by tab:
+
+- **Fix** (red): problems that stop a chart or make a number wrong, such as a column with values but no header,
+  a second table below a blank row, formula errors (`#DIV/0!`, `#N/A`) and number columns where too many cells
+  aren't numbers.
+- **Worth a look** (amber): things the charts work around, such as cells that aren't numbers (left out),
+  the same category spelled two ways, repeated headers, many blank cells and exact duplicate rows.
+- **Tidied for you** (grey): title rows above the table, total rows left out, month columns turned into a series.
+
+Each item names the cell (`D14`, or a line number for CSV) and says how to fix it in Excel. Each tab also lists
+the views it can show now and what to add to unlock more (a date column, a text column, a second number). Typing
+"check my file" does the same. Files the agent can't chart at all get the button on the error card.
+
+![File check](docs/file-check.png)
+
 ## What it does that Excel doesn't
 
 Excel draws the numbers you select. This agent reads the whole tab and works out what matters:
@@ -104,6 +122,7 @@ Typed shortcuts work at any point: *"show revenue by product as a heatmap"*, *"u
 | `agent/page.py` | the self-contained dashboard page (Canvas + IFrameSrcdoc) |
 | `agent/llm.py`, `agent/schema.py` | the narrative call, number grounding, facts-only fallback |
 | `agent/render.py` | A2UI cards: welcome, tab picker, style picker, dashboard, error |
+| `agent/review.py` | the upfront file check: findings per tab with cell references and fixes, and its page |
 | `agent/pdf.py` | the PDF report (reportlab) |
 | `agent/a2ui.py`, `agent/validate.py`, `agent/schemas/` | from the boilerplate: v0.9 helpers and offline validation against the GE catalog |
 | `agent/probe*.py`, `PROBE.md` | from the boilerplate: `AGENT_MODE=probe` tenant probe |
