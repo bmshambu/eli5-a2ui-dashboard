@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import pathlib
 import re
@@ -59,7 +60,7 @@ def test_period_of(raw, expected):
     assert (got.strftime("%Y-%m-%d") if got is not None else None) == expected
 
 
-@pytest.mark.parametrize("raw,expected", [("£1,200", 1200), ("(300)", -300), ("12%", 12), ("1.5k", 1500), ("USD40", 40), ("abc", None), (True, None)])
+@pytest.mark.parametrize("raw,expected", [("£1,200", 1200), ("(300)", -300), ("12%", 12), ("1.5k", 1500), ("USD40", 40), ("18°C", 18), ("-3.5°F", -3.5), ("abc", None), (True, None)])
 def test_to_number(raw, expected):
     assert sheets.to_number(raw) == expected
 
@@ -360,3 +361,20 @@ def test_every_view_has_a_theme_switch_and_themed_heatmap_colours(tabs, style):
     assert all(f'data-t="{t}"' in html_ for t in ("auto", "light", "dark"))
     assert ":root[data-theme=dark]" in html_ and ":root:not([data-theme=light])" in html_
     assert not re.search(r'style="background:#', html_)  # cell colours come from the theme, not fixed hex
+
+
+def test_one_row_per_category_sheet_charts_in_every_style():
+    # A small weather sheet: every city is its own row, so there are no peer groups for anomalies.
+    df = pd.DataFrame({"city": ["London", "Paris", "Delhi", "Mumbai", "Tokyo", "Sydney", "Cairo", "Oslo"],
+                       "temperature highest": ["18°C", "21°C", "38°C", "33°C", "26°C", "24°C", "35°C", "9°C"],
+                       "temperature lowest": [9, 12, 27, 26, 18, 14, 22, 1],
+                       "humidity highest": ["88%", "80%", "60%", "90%", "75%", "70%", "40%", "85%"],
+                       "humidity lowest": [55, 50, 25, 70, 45, 40, 15, 60]})
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, sheet_name="Weather")
+    up = sheets.Upload("weather.xlsx", buf.getvalue(), sheets.XLSX)
+    sheet, = sheets.read(up)
+    assert set(sheets.profile(sheet).measures) == {"temperature highest", "temperature lowest", "humidity highest", "humidity lowest"}
+    for style in analysis.STYLES:
+        a = analysis.analyze(sheet, style)
+        validate.check(render.dashboard_card(a, llm.fallback(a), up.name))

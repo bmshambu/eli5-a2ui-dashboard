@@ -424,7 +424,7 @@ def _anomaly_facts(f: _Facts, a: Analysis, df: pd.DataFrame, p: Profile, measure
         return
     z = d.groupby([d[k].astype(str) for k in keys])[measure].transform(_robust_z) if keys else _robust_z(d[measure])
     med = d.groupby([d[k].astype(str) for k in keys])[measure].transform("median") if keys else d[measure].median()
-    ratio = (d[measure] / med).where(med != 0)
+    ratio = (d[measure] / med).where(pd.Series(med, index=d.index) != 0)  # med is a scalar when there are no peer groups
     out = z[(z.abs() > 5) & ((ratio >= 2) | (ratio <= 0.4))].abs().sort_values(ascending=False)
     if out.empty:
         f.add("anomaly", f"No single row of {measure} is far out of line with its peers (none beyond 5 robust standard deviations).", 0.5)

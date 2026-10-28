@@ -167,7 +167,7 @@ def _names(values) -> list[str]:
 
 
 def to_number(v):
-    """12, '1,234', '£1.2k', '(300)', '12%' -> float, else None."""
+    """12, '1,234', '£1.2k', '(300)', '12%', '18°C' -> float, else None."""
     if v is None or isinstance(v, bool) or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, (int, float)):
@@ -178,6 +178,7 @@ def to_number(v):
     neg = s.startswith("(") and s.endswith(")")
     s = s.strip("()").replace(",", "").replace(" ", "")
     s = re.sub(r"^[£$€¥₹]|^[A-Z]{3}(?=\d)", "", s).rstrip("%")
+    s = re.sub(r"°[CF]?$", "", s, flags=re.I)  # temperatures
     mult = 1.0
     if re.fullmatch(r"-?\d+(\.\d+)?[kmbKMB]", s):
         mult = {"k": 1e3, "m": 1e6, "b": 1e9}[s[-1].lower()]
