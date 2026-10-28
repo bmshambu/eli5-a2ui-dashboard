@@ -5,6 +5,8 @@ Every button carries in its context everything the handler needs (sheet, style, 
 dimension), so a click works from any card without guessing from state, and a `prompt` that GE
 shows as the user's turn.
 """
+import json
+
 from . import a2ui, page
 from .analysis import STYLES, Analysis, available
 from .schema import Narrative
@@ -22,9 +24,14 @@ def _text(cid: str, text: str, hint: str = "body") -> dict:
     return {"id": cid, "component": "MaterialText", "text": text, "usageHint": hint}
 
 
+def _flat(context: dict) -> dict:
+    """A2UI context values must be plain values, so nested ones (the explorer's filters) travel as JSON."""
+    return {k: json.dumps(v, separators=(",", ":")) if isinstance(v, (dict, list)) else v for k, v in context.items()}
+
+
 def _button(cid: str, label: str, action: str, context: dict, icon: str | None = None, variant: str = "stroked") -> dict:
     b = {"id": cid, "component": "MaterialButton", "label": label, "variant": variant,
-         "action": {"event": {"name": action, "context": context}}}
+         "action": {"event": {"name": action, "context": _flat(context)}}}
     if icon:
         b["leadingIcon"] = icon
     return b

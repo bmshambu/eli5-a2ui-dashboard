@@ -9,7 +9,7 @@ Chips post {type:'a2ui_action'} to the parent; GE delivers them to the agent lik
 import html
 import json
 
-from . import charts
+from . import charts, explorer
 from .analysis import STYLES, Analysis, available
 from .schema import Narrative
 
@@ -19,10 +19,19 @@ ASK_ACTION = "ask"
 CSS = """
 :root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;
 --axis:#c3c2b7;--line:rgba(11,11,11,.10);--s1:#2a78d6;--s2:#eb6834;--s1soft:rgba(42,120,214,.14);--up:#2a78d6;--down:#e34948;
---good:#006300;--bad:#d03b3b;--accent:#2a78d6;--chip:#eef3fb;--warn:#fab219}
-@media (prefers-color-scheme:dark){:root{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
+--good:#006300;--bad:#d03b3b;--accent:#2a78d6;--chip:#eef3fb;--warn:#fab219;
+--r0:#e8f1fd;--ri0:#0b0b0b;--r1:#cde2fb;--ri1:#0b0b0b;--r2:#b7d3f6;--ri2:#0b0b0b;--r3:#9ec5f4;--ri3:#0b0b0b;--r4:#86b6ef;--ri4:#0b0b0b;--r5:#6da7ec;--ri5:#0b0b0b;--r6:#5598e7;--ri6:#0b0b0b;--r7:#3987e5;--ri7:#ffffff;--r8:#2a78d6;--ri8:#ffffff;--r9:#256abf;--ri9:#ffffff;--r10:#1c5cab;--ri10:#ffffff;--r11:#104281;--ri11:#ffffff}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
 --muted:#898781;--grid:#2c2c2a;--axis:#383835;--line:rgba(255,255,255,.10);--s1:#3987e5;--s2:#d95926;--s1soft:rgba(57,135,229,.22);
---up:#3987e5;--down:#e66767;--good:#0ca30c;--bad:#e66767;--accent:#3987e5;--chip:#1f2a3a}}
+--up:#3987e5;--down:#e66767;--good:#0ca30c;--bad:#e66767;--accent:#3987e5;--chip:#1f2a3a;
+--r0:#104281;--ri0:#ffffff;--r1:#1c5cab;--ri1:#ffffff;--r2:#256abf;--ri2:#ffffff;--r3:#2a78d6;--ri3:#ffffff;--r4:#3987e5;--ri4:#ffffff;--r5:#5598e7;--ri5:#0b0b0b;--r6:#6da7ec;--ri6:#0b0b0b;--r7:#86b6ef;--ri7:#0b0b0b;--r8:#9ec5f4;--ri8:#0b0b0b;--r9:#b7d3f6;--ri9:#0b0b0b;--r10:#cde2fb;--ri10:#0b0b0b;--r11:#e8f1fd;--ri11:#0b0b0b}}
+:root[data-theme=dark]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
+--muted:#898781;--grid:#2c2c2a;--axis:#383835;--line:rgba(255,255,255,.10);--s1:#3987e5;--s2:#d95926;--s1soft:rgba(57,135,229,.22);
+--up:#3987e5;--down:#e66767;--good:#0ca30c;--bad:#e66767;--accent:#3987e5;--chip:#1f2a3a;
+--r0:#104281;--ri0:#ffffff;--r1:#1c5cab;--ri1:#ffffff;--r2:#256abf;--ri2:#ffffff;--r3:#2a78d6;--ri3:#ffffff;--r4:#3987e5;--ri4:#ffffff;--r5:#5598e7;--ri5:#0b0b0b;--r6:#6da7ec;--ri6:#0b0b0b;--r7:#86b6ef;--ri7:#0b0b0b;--r8:#9ec5f4;--ri8:#0b0b0b;--r9:#b7d3f6;--ri9:#0b0b0b;--r10:#cde2fb;--ri10:#0b0b0b;--r11:#e8f1fd;--ri11:#0b0b0b}
+.theme{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;float:right;margin-left:8px}
+.theme button{border:0;background:var(--surface);color:var(--ink2);font:inherit;font-size:12px;padding:3px 10px;cursor:pointer}
+.theme button.on{background:var(--accent);color:#fff}
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:1040px;margin:0 auto;padding:20px 18px 40px}
@@ -106,6 +115,12 @@ border-radius:10px;padding:10px 14px;margin:-4px 0 16px;font-size:14px;color:var
 """
 
 JS = """
+(function(){var K='sheetInsightsTheme',root=document.documentElement,t='auto';
+try{t=localStorage.getItem(K)||'auto';}catch(e){}
+function set(v){t=v;if(v==='auto')root.removeAttribute('data-theme');else root.setAttribute('data-theme',v);
+  document.querySelectorAll('.theme button').forEach(function(b){b.classList.toggle('on',b.dataset.t===v);});
+  try{localStorage.setItem(K,v);}catch(e){}}
+document.querySelectorAll('.theme button').forEach(function(b){b.onclick=function(){set(b.dataset.t);};});set(t);})();
 (function(){
 var tip=document.getElementById('tip');
 document.addEventListener('mousemove',function(e){
@@ -159,12 +174,14 @@ def chart_title(a: Analysis) -> tuple[str, str]:
     c = a.chart
     g = a.prof.grain or "period"
     word = "average" if a.agg == "mean" else "total"
+    if a.style == "explore":
+        return explorer.title(a)
     return {
         "trend": (f"{a.measure} by {g}, with trend and forecast", f"{word.capitalize()} per {g}. Hover any point for the value and its change."),
         "pareto": (f"{a.measure} by {a.dim}, ranked", "Blue bars are the few items that together make 80% of the total."),
         "bridge": (f"What moved {a.measure} from {c.get('start', {}).get('label')} to {c.get('end', {}).get('label')}",
                    f"Start level, the change from each {a.dim}, end level."),
-        "heatmap": (f"{a.measure} by {a.dim} and {c.get('col_name')}", "Darker is higher. Outlined cells are far from what their row and column predict."),
+        "heatmap": (f"{a.measure} by {a.dim} and {c.get('col_name')}", "Colour runs low to high along the scale. Outlined cells are far from what their row and column predict."),
         "multiples": (f"{a.measure} by {g}, one panel per {a.dim}", "Same scale in every panel; the arrow is the change from first to last."),
         "scatter": (f"{c.get('y')} against {c.get('x')}", "Each dot is a row. Orange dots sit furthest from the fit line."),
         "distribution": (f"How {a.measure} is spread across rows", "Bars count rows in each range; orange ranges are unusually high."),
@@ -212,10 +229,11 @@ def page(a: Analysis, n: Narrative, file: str) -> str:
     heads = f'<div class="heads"><b>Heads-up</b><span>{_e(" ".join(warn))}</span></div>' if warn else ""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_e(a.sheet)} insights</title><style>{CSS}</style></head><body><div class="wrap">
+<div class="theme" role="group" aria-label="Theme"><button data-t="auto">Auto</button><button data-t="light">Light</button><button data-t="dark">Dark</button></div>
 <div class="eyebrow">{_e(file)} · {_e(a.sheet)} tab · {a.prof.rows:,} rows</div>
 <h1>{_e(n.headline)}</h1><p class="summary">{_e(n.summary)}</p>
 <div class="controls">{controls}</div>
-<section class="kpis">{kpis}</section>
+{"" if a.style == "explore" else f'<section class="kpis">{kpis}</section>'}
 {heads}<section class="card"><h2>{_e(title)}</h2><p class="sub">{_e(sub)}</p>{charts.draw(a)}{_table(a.table)}</section>
 <section class="insights">{"".join(cards)}</section>
 <section class="two"><div class="card"><h2>What to do next</h2><ol>{actions}</ol></div>

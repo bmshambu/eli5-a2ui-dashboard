@@ -21,6 +21,7 @@ from .sheets import Profile, Sheet, is_rate, label, profile
 # style id: (name, Material icon, what it shows)
 STYLES = {
     "auto": ("Auto pick", "auto_awesome", "I pick the view that tells the clearest story"),
+    "explore": ("Interactive explorer", "dashboard", "Power BI-style: bubble chart and heatmap with slicers, click-to-filter and a sortable table"),
     "trend": ("Trend + forecast", "show_chart", "Trend line, rolling average and a 3-period forecast band, with peaks and jumps marked"),
     "pareto": ("Ranked drivers (80/20)", "bar_chart", "Ranked bars with running share; the few items that make 80% stand out"),
     "bridge": ("Change bridge", "waterfall_chart", "Waterfall from the first to the last period: which categories drove the change"),
@@ -79,19 +80,24 @@ class Analysis:
     table: dict = field(default_factory=dict)  # {"columns": [...], "rows": [[...]]}
     notes: list[str] = field(default_factory=list)
     dft: object = None  # the rows the time-based views use (a partial last period left out)
+    filters: dict | None = None  # {"dims": {column: [values]}, "from": iso date, "to": iso date}
+    base: object = None  # all rows, unfiltered (the explorer's slicers can widen the view again)
 
     def fact_lines(self) -> str:
         return "\n".join(f"{f.id} [{f.kind}] {f.text}" for f in self.facts)
 
     def meta(self) -> dict:
-        return {"sheet": self.sheet, "style": self.style, "measure": self.measure, "dim": self.dim}
+        meta = {"sheet": self.sheet, "style": self.style, "measure": self.measure, "dim": self.dim}
+        if self.filters:
+            meta["filters"] = self.filters
+        return meta
 
 
 # ── Which styles fit a tab ───────────────────────────────────────────────────
 
 def available(p: Profile) -> dict[str, bool]:
     t, d, m = bool(p.time), bool(p.dimensions), len(p.measures)
-    return {"auto": m > 0, "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
+    return {"auto": m > 0, "explore": m > 0 and (d or t), "trend": t and m > 0, "pareto": d and m > 0, "bridge": t and d and m > 0,
             "heatmap": d and m > 0 and (t or len(p.dimensions) > 1), "multiples": t and d and m > 0,
             "scatter": m > 1, "distribution": m > 0}
 
@@ -100,7 +106,7 @@ def resolve(style: str, p: Profile) -> str:
     ok = available(p)
     if style in ok and ok[style] and style != "auto":
         return style
-    for s in ("trend", "pareto", "scatter", "distribution"):
+    for s in ("explore", "trend", "pareto", "scatter", "distribution"):
         if ok[s]:
             return s
     return "distribution"
@@ -170,11 +176,43 @@ class _Facts:
         return fid
 
 
-def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: str | None = None) -> Analysis:
+def apply_filters(df: pd.DataFrame, p: Profile, filters: dict | None) -> tuple[pd.DataFrame, dict | None, str | None]:
+    """Rows matching the explorer's slicers and cross-filter, the filters actually applied, and
+    how to describe them. Unknown columns and empty lists are ignored."""
+    if not filters:
+        return df, None, None
+    out, used, words = df, {}, []
+    for col, vals in (filters.get("dims") or {}).items():
+        if col in df.columns and isinstance(vals, list) and vals:
+            vals = [str(v) for v in vals][:200]
+            out = out[out[col].astype(str).isin(vals)]
+            used.setdefault("dims", {})[col] = vals
+            words.append(f"{col} = {', '.join(vals[:4])}{f' and {len(vals) - 4} more' if len(vals) > 4 else ''}")
+    if p.time:
+        per = _period(out, p.time, p.grain)
+        lo, hi = pd.to_datetime(filters.get("from"), errors="coerce"), pd.to_datetime(filters.get("to"), errors="coerce")
+        if pd.notna(lo) or pd.notna(hi):
+            keep = per.notna()
+            if pd.notna(lo):
+                keep &= per >= lo
+                used["from"] = lo.strftime("%Y-%m-%d")
+            if pd.notna(hi):
+                keep &= per <= hi
+                used["to"] = hi.strftime("%Y-%m-%d")
+            out = out[keep]
+            a, b = label(lo, p.grain) if pd.notna(lo) else "the start", label(hi, p.grain) if pd.notna(hi) else "the end"
+            words.append(f"{p.time} {a}" if a == b else f"{p.time} {a} to {b}")
+    if out.empty:
+        raise ValueError("no rows match those filters")
+    return out, used or None, "; ".join(words) or None
+
+
+def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: str | None = None,
+            filters: dict | None = None) -> Analysis:
     p = profile(sheet)
     if not p.measures:
         raise ValueError(f"the {sheet.name} tab has no number columns to chart")
-    df = sheet.df
+    df, used, described = apply_filters(sheet.df, p, filters)
     measure = measure if measure in p.measures else p.measures[0]
     dim = dim if dim in p.dimensions else (p.dimensions[0] if p.dimensions else None)
     drawn = resolve(style, p)
@@ -183,7 +221,11 @@ def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: 
                  notes=list(sheet.notes))
     if style not in ("auto", drawn) and style in STYLES:
         a.notes.append(f"{STYLES[style][0]} needs {_needs(style)}, which this tab doesn't have, so I drew {STYLES[drawn][0]} instead.")
+    a.filters, a.base = used, sheet.df
     f = _Facts()
+    if described:
+        f.add("summary", f"This view is filtered to {described} ({len(df):,} of {len(sheet.df):,} rows).", 0.4)
+        a.notes.append(f"Filtered to {described}.")
     word = "average" if agg == "mean" else "total"
     vals = df[measure].dropna()
 
@@ -214,7 +256,7 @@ def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: 
     _spread_fact(f, vals, measure)
     _quality_facts(f, a, df, measure)
 
-    builder = {"trend": _trend, "pareto": _pareto, "bridge": _bridge, "heatmap": _heatmap,
+    builder = {"trend": _trend, "pareto": _pareto, "bridge": _bridge, "heatmap": _heatmap, "explore": _explore,
                "multiples": _multiples, "scatter": _scatter, "distribution": _distribution}[drawn]
     builder(a, dft if drawn in ("trend", "bridge", "heatmap", "multiples") and p.time else df, p, f)
     # Facts that explain the chart on screen come first in the no-model fallback.
@@ -231,7 +273,7 @@ def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: 
 
 
 _STEP = {"day": pd.DateOffset(days=1), "month": pd.DateOffset(months=1), "quarter": pd.DateOffset(months=3), "year": pd.DateOffset(years=1)}
-_STYLE_KINDS = {"trend": ("trend", "forecast"), "pareto": ("concentration", "driver"), "bridge": ("driver",),
+_STYLE_KINDS = {"explore": ("driver", "concentration", "anomaly"), "trend": ("trend", "forecast"), "pareto": ("concentration", "driver"), "bridge": ("driver",),
                 "heatmap": ("anomaly",), "multiples": ("driver",), "scatter": ("relationship",), "distribution": ("distribution",)}
 
 
@@ -254,7 +296,8 @@ def _partial_period(df: pd.DataFrame, p: Profile) -> tuple[pd.Timestamp, pd.Time
 def _needs(style: str) -> str:
     return {"trend": "a date or period column", "pareto": "a category column", "bridge": "a date and a category column",
             "heatmap": "a category column and a date (or a second category)", "multiples": "a date and a category column",
-            "scatter": "two number columns", "distribution": "a number column"}.get(style, "other columns")
+            "scatter": "two number columns", "distribution": "a number column",
+            "explore": "a category or a date column"}.get(style, "other columns")
 
 
 def _time_facts(f: _Facts, a: Analysis, s: pd.Series, p: Profile, measure: str, df: pd.DataFrame) -> None:
@@ -600,3 +643,136 @@ def _distribution(a: Analysis, df, p: Profile, f: _Facts) -> None:
     a.chart.update({"type": "distribution", "counts": [int(c) for c in counts], "edges": [float(e) for e in edges],
                     "median": med, "mean": mean, "q1": q1, "q3": q3, "fence": hi_fence, "outliers": n_out})
     a.table = {"columns": ["From", "To", "Rows"], "rows": [[num(edges[i]), num(edges[i + 1]), str(int(counts[i]))] for i in range(len(counts))]}
+
+
+# ── Interactive explorer (Power BI-style) ────────────────────────────────────
+
+MAX_CUBE_ROWS = 6000
+MAX_ID_ROWS = 1500  # below this, each row can be its own bubble (e.g. one per customer)
+
+
+def _id_column(df: pd.DataFrame, p: Profile) -> str | None:
+    """A text column that names each row (Customer ID, Project), for one bubble per row."""
+    if len(df) > MAX_ID_ROWS:
+        return None
+    for c in df.columns:
+        if c in p.measures or c in p.dimensions or c == p.time or pd.api.types.is_numeric_dtype(df[c]):
+            continue
+        if df[c].notna().all() and df[c].is_unique:
+            return c
+    return None
+
+
+def cube(base: pd.DataFrame, p: Profile) -> dict:
+    """The tab pre-aggregated by its categories and periods, small enough to embed in the page.
+    Rows are [category index..., period index or -1, row count, sum and count per measure]; the
+    page filters and regroups them in the browser, so slicers and clicks need no round trip."""
+    dims = [d for d in p.dimensions if base[d].nunique() <= 30][:3]
+    ident = _id_column(base, p)
+    keys = dims + ([ident] if ident else [])
+    measures = p.measures[:6]
+    d = base.copy()
+    if p.time:
+        d["_p"] = _period(d, p.time, p.grain)
+        d = d[d["_p"].notna()]
+    def size(ks):
+        return d.groupby([d[k].astype(str) for k in ks] + ([d["_p"]] if p.time else []), dropna=False).ngroups if ks or p.time else 1
+    while keys and size(keys) > MAX_CUBE_ROWS:
+        keys.pop()
+    for k in keys:
+        d[k] = d[k].fillna("(blank)").astype(str)
+    values = {k: sorted(d[k].unique(), key=lambda v: -float(d.loc[d[k] == v, measures[0]].abs().sum())) for k in keys}
+    index = {k: {v: i for i, v in enumerate(values[k])} for k in keys}
+    periods = sorted(d["_p"].unique()) if p.time else []
+    pidx = {t: i for i, t in enumerate(periods)}
+    by = keys + (["_p"] if p.time else [])
+    agg = {"_n": (measures[0], "size")}
+    for i, m in enumerate(measures):
+        agg[f"_s{i}"] = (m, "sum")
+        agg[f"_c{i}"] = (m, "count")
+    g = d.groupby(by, dropna=False).agg(**agg).reset_index() if by else d.agg(**agg).T.reset_index(drop=True)
+    rows = []
+    for rec in g.to_dict("records"):
+        row = [index[k][rec[k]] for k in keys] + [pidx[rec["_p"]] if p.time else -1, int(rec["_n"])]
+        for i in range(len(measures)):
+            row += [round(float(rec[f"_s{i}"]), 4), int(rec[f"_c{i}"])]
+        rows.append(row)
+    return {"dims": [{"name": k, "values": values[k], "id": k == ident} for k in keys],
+            "time": {"name": p.time, "grain": p.grain, "labels": [label(t, p.grain) for t in periods],
+                     "iso": [t.strftime("%Y-%m-%d") for t in periods]} if p.time else None,
+            "measures": [{"name": m, "rate": is_rate(m)} for m in measures], "rows": rows}
+
+
+def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
+    base = a.base
+    partial = _partial_period(base, p) if p.time else None
+    if partial is not None:
+        base = base[pd.to_datetime(base[p.time]) < partial[0]]
+    c = cube(base, p)
+    dims, ms = c["dims"], c["measures"]
+    names = [x["name"] for x in dims]
+    plain = [i for i, x in enumerate(dims) if not x["id"]]
+    m0 = ms.index(next(m for m in ms if m["name"] == a.measure)) if any(m["name"] == a.measure for m in ms) else 0
+    m1 = next((i for i in range(len(ms)) if i != m0), None)
+    detail = names.index(a.dim) if a.dim in names else (plain[0] if plain else 0)
+    ident = next((i for i, x in enumerate(dims) if x["id"]), None)
+    if ident is not None and len(dims[detail]["values"]) < 4:
+        detail = ident  # three segments make a poor bubble chart; one bubble per row reads better
+    m2 = next((i for i in range(len(ms)) if i not in (m0, m1)), None)
+    if p.time:  # growth against size: the "where to look" view
+        x, y, sz = f"m:{m0}:growth", f"m:{m0}:total", f"m:{m1}:total" if m1 is not None else "rows"
+    else:  # no dates: two numbers against each other, a third as bubble size
+        x = f"m:{m1}:avg" if m1 is not None else "rows"
+        y = f"m:{m0}:avg" if detail == ident else f"m:{m0}:total"
+        sz = f"m:{m2}:avg" if m2 is not None else "rows"
+    color = plain[0] if detail == ident and plain else detail
+    hm_row = plain[0] if plain else 0
+    hm_col = "time" if p.time else (str(plain[1]) if len(plain) > 1 else None)
+    init = {"dims": {}, "from": None, "to": None}
+    for col, vals in ((a.filters or {}).get("dims") or {}).items():
+        if col in names:
+            idx = [dims[names.index(col)]["values"].index(v) for v in vals if v in dims[names.index(col)]["values"]]
+            init["dims"][str(names.index(col))] = idx
+    if c["time"]:
+        iso = c["time"]["iso"]
+        lo, hi = (a.filters or {}).get("from"), (a.filters or {}).get("to")
+        init["from"] = next((i for i, t in enumerate(iso) if lo and t >= lo), None) if lo else None
+        init["to"] = max((i for i, t in enumerate(iso) if hi and t <= hi), default=None) if hi else None
+    a.chart.update({"type": "explore", "cube": c, "init": init,
+                    "defaults": {"detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0}})
+    _quadrant_fact(f, a, df, p)
+    if a.dim:
+        cats = by_cat(df, a.dim, a.measure, a.agg)
+        a.table = {"columns": [a.dim, a.measure], "rows": [[k, num(v)] for k, v in cats.items()][:50]}
+    else:
+        a.table = {"columns": ["Rows", a.measure], "rows": [[f"{len(df):,}", num(float(df[a.measure].sum()))]]}
+
+
+def _quadrant_fact(f: _Facts, a: Analysis, df: pd.DataFrame, p: Profile) -> None:
+    """Size against growth per category (the bubble chart's default view), in words."""
+    if not (a.dim and p.time and a.agg == "sum"):
+        return
+    d = (a.dft if a.dft is not None else df)
+    d = d[d.index.isin(df.index)][[p.time, a.dim, a.measure]].dropna()
+    d = d.assign(_p=_period(d, p.time, p.grain), **{a.dim: d[a.dim].astype(str)})
+    pv = d.pivot_table(index="_p", columns=a.dim, values=a.measure, aggfunc="sum").sort_index()
+    if len(pv) < 2 or pv.shape[1] < 4:
+        return
+    first, last, total = pv.iloc[0], pv.iloc[-1], pv.sum()
+    growth = ((last - first) / first.abs() * 100).where(first > 0).dropna()
+    if len(growth) < 4:
+        return
+    big, fast = total[growth.index] >= total[growth.index].median(), growth > growth.median()
+    stars = list(growth[big & fast].sort_values(ascending=False).index)
+    rising = list(growth[~big & fast].sort_values(ascending=False).index)
+    slowing = list(growth[big & ~fast].sort_values().index)
+    g0, g1 = label(pv.index[0], p.grain), label(pv.index[-1], p.grain)
+    bits = []
+    if stars:
+        bits.append(f"big and growing fastest: {', '.join(f'{k} ({pct(growth[k])})' for k in stars[:3])}")
+    if rising:
+        bits.append(f"smaller but growing fast: {', '.join(f'{k} ({pct(growth[k])})' for k in rising[:3])}")
+    if slowing:
+        bits.append(f"big but growing slowest: {', '.join(f'{k} ({pct(growth[k])})' for k in slowing[:3])}")
+    if bits:
+        f.add("driver", f"Size against growth by {a.dim} ({g0} to {g1}): " + "; ".join(bits) + ".", 2.6)

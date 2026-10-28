@@ -85,7 +85,7 @@ def test_every_style_on_every_tab_renders_and_validates(tabs, tab, style):
 
 def test_style_that_does_not_fit_falls_back_with_a_note(tabs):
     a = analysis.analyze(_tab(tabs, "Customers"), "trend")
-    assert a.style == "pareto" and any("needs a date" in n for n in a.notes)
+    assert a.style == "explore" and any("needs a date" in n for n in a.notes)
 
 
 def test_sales_facts_find_partial_month_anomalies_and_drivers(tabs):
@@ -283,3 +283,80 @@ def test_pdf_builds_for_every_style(tabs):
     for style in analysis.STYLES:
         a = analysis.analyze(_tab(tabs, "Monthly Sales"), style)
         assert pdf.build(a, llm.fallback(a), BOOK.name).startswith(b"%PDF")
+
+
+# --- interactive explorer ---------------------------------------------------------------
+
+def _explorer_data(html_: str) -> dict:
+    m = re.search(r'<script type="application/json" id="ex-data">(.*?)</script>', html_, re.S)
+    return json.loads(m.group(1).replace("<\\/", "</"))
+
+
+def test_auto_picks_the_explorer_when_there_are_categories(tabs):
+    for name in ("Monthly Sales", "Spend by Dept", "Customers"):
+        assert analysis.analyze(_tab(tabs, name)).style == "explore"
+
+
+@pytest.mark.parametrize("tab", ["Monthly Sales", "Spend by Dept", "Customers"])
+def test_explorer_cube_page_validates_and_fits(tabs, tab):
+    a = analysis.analyze(_tab(tabs, tab), "explore")
+    messages = render.dashboard_card(a, llm.fallback(a), BOOK.name)
+    validate.check(messages)
+    html_ = _components(messages)["frame"]["htmlContent"]
+    assert len(json.dumps(messages).encode()) < 800_000
+    data = _explorer_data(html_)
+    cube, d = data["cube"], data["defaults"]
+    width = len(cube["dims"]) + 2 + 2 * len(cube["measures"])
+    assert cube["rows"] and all(len(r) == width for r in cube["rows"])
+    for key in ("x", "y", "size"):  # every default metric is one the page offers
+        mid = d[key]
+        assert mid == "rows" or int(mid.split(":")[1]) < len(cube["measures"])
+    for vid in ("ex-bins", "ex-hins", "ex-tins", "ex-kins"):  # an insight panel per visual
+        assert f'id="{vid}"' in html_
+
+
+def test_cube_totals_match_the_sheet(tabs):
+    sheet = _tab(tabs, "Spend by Dept")
+    a = analysis.analyze(sheet, "explore")
+    cube = _explorer_data(page.page(a, llm.fallback(a), BOOK.name))["cube"]
+    nd, i = len(cube["dims"]), next(k for k, m in enumerate(cube["measures"]) if m["name"] == a.measure)
+    in_cube = sum(r[nd + 2 + 2 * i] for r in cube["rows"])
+    df = sheet.df
+    assert in_cube == pytest.approx(df[a.measure].sum(), rel=0.02)  # less only the partial period, if any
+
+
+def test_filters_narrow_the_rows_and_are_described(tabs):
+    sheet = _tab(tabs, "Monthly Sales")
+    a = analysis.analyze(sheet, "explore", filters={"dims": {"Region": ["South"], "Nope": ["x"]}, "from": "2024-06-01", "to": "2024-06-30"})
+    assert a.filters == {"dims": {"Region": ["South"]}, "from": "2024-06-01", "to": "2024-06-30"}
+    assert a.meta()["filters"] == a.filters
+    assert any("filtered to Region = South" in f.text for f in a.facts)
+    with pytest.raises(ValueError, match="no rows match"):
+        analysis.analyze(sheet, "explore", filters={"dims": {"Region": ["Atlantis"]}})
+
+
+def test_explain_this_view_reanalyses_the_filtered_rows(fake):
+    f = {"dims": {"Region": ["South"]}, "from": "2024-06-01", "to": "2024-06-30"}
+    turns = _converse([
+        _upload(BOOK, "Use Monthly Sales as interactive explorer"),
+        _click("ask", {"sheet": "Monthly Sales", "style": "explore", "measure": "Revenue", "dim": "Region", "filters": f,
+                       "prompt": "Explain this view: Region = South, Jun 2024"}),
+        _click("pdf", {"sheet": "Monthly Sales", "style": "explore", "measure": "Revenue", "dim": "Region", "filters": json.dumps(f)}),
+    ])
+    msgs = _messages(turns[1])
+    validate.check(msgs)
+    assert "Explain this view: Region = South" in fake.calls[-1][0] and "filtered to Region = South" in fake.calls[-1][0]
+    comps = _components(msgs)
+    assert _explorer_data(comps["frame"]["htmlContent"])["init"]
+    assert json.loads(comps["pdf"]["action"]["event"]["context"]["filters"]) == f  # buttons carry filters as JSON
+    files = [p for e in turns[2] for p in e.content.parts if p.inline_data and p.inline_data.mime_type == "application/pdf"]
+    assert len(files) == 1 and files[0].inline_data.data.startswith(b"%PDF")
+
+
+@pytest.mark.parametrize("style", ["explore", "heatmap", "trend"])
+def test_every_view_has_a_theme_switch_and_themed_heatmap_colours(tabs, style):
+    a = analysis.analyze(_tab(tabs, "Monthly Sales"), style)
+    html_ = page.page(a, llm.fallback(a), BOOK.name)
+    assert all(f'data-t="{t}"' in html_ for t in ("auto", "light", "dark"))
+    assert ":root[data-theme=dark]" in html_ and ":root:not([data-theme=light])" in html_
+    assert not re.search(r'style="background:#', html_)  # cell colours come from the theme, not fixed hex

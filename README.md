@@ -7,12 +7,41 @@ Agent Engine, A2UI v0.9).
 
 ![Trend with forecast](docs/trend.png)
 
+## Interactive explorer (Power BI-style)
+
+The default view when a tab has a number and a category or date. One page in the side panel, everything
+filtered in the browser with no round trip to the agent:
+
+- **Slicers**: a date range and a checklist per category column.
+- **Bubble chart**: one bubble per category (or per row when there is an ID column such as Customer ID),
+  growth against size by default, with quadrant lines at the medians and labels like "Big and growing".
+  Any number can go on x, y, size and colour.
+- **Heatmap**: category by period (or by a second category), with row totals.
+- **KPI tiles** and a **sortable table** for the same view.
+- **Cross-filter**: click a bubble, a heatmap cell or a table row and the other visuals filter to it; click
+  again to clear. The visual you clicked keeps showing everything so you can compare.
+- **Insights on every visual**: each one has its own "Insights for this view" panel (leader, quadrants,
+  correlation, outliers, hottest and coldest cells, unusual cells, steadiest and most volatile rows, spread)
+  that recomputes on every filter and click.
+- **Explain this view**: sends the current filters back to the agent, which re-runs the full analysis on
+  just those rows and writes the story for them. The PDF button then exports that filtered view.
+
+Every view (explorer and the 7 chart styles) follows the device's light or dark setting by default, and an
+Auto / Light / Dark switch at the top lets the viewer override it, since GE's own theme can differ from the
+device's. Heatmap colours flip with the theme so low values stay close to the background.
+
+The page carries a pre-aggregated cube (at most 6,000 rows by category, period and up to 6 numbers), so it
+stays well under GE's 800 KB message limit on large sheets.
+
+![Interactive explorer](docs/explorer.png)
+
 ## What it does that Excel doesn't
 
 Excel draws the numbers you select. This agent reads the whole tab and works out what matters:
 
 | | |
 |---|---|
+| **Interactive explorer** | bubble chart, heatmap, KPIs and table with slicers and click-to-filter; live insights per visual |
 | **Trend + forecast** | trend line, 3-period rolling average, a 3-period forecast with a 95% range; peak, low and biggest move marked |
 | **Ranked drivers (80/20)** | ranked bars with running share; the few items that make 80% of the total highlighted |
 | **Change bridge** | waterfall from the first to the last period: how much each category added or took away |
@@ -71,6 +100,7 @@ Typed shortcuts work at any point: *"show revenue by product as a heatmap"*, *"u
 | `agent/sheets.py` | reading .xlsx/.csv from the GE turn, tidying, column roles (`profile`) |
 | `agent/analysis.py` | facts, KPIs and chart data per style |
 | `agent/charts.py` | the 7 chart styles as inline SVG/HTML |
+| `agent/explorer.py` | the interactive explorer: page, cube JSON and the in-frame JS (filters, visuals, per-visual insights) |
 | `agent/page.py` | the self-contained dashboard page (Canvas + IFrameSrcdoc) |
 | `agent/llm.py`, `agent/schema.py` | the narrative call, number grounding, facts-only fallback |
 | `agent/render.py` | A2UI cards: welcome, tab picker, style picker, dashboard, error |
@@ -107,6 +137,8 @@ Judge rendering only in GE chat: the Agent Engine Playground and `adk web` show 
   for ELI5). The logs show `turn parts: [...]` each turn; if GE sends a `file_data` URI instead, the agent
   needs a download step.
 - The dashboard is about 25 to 70 KB per page, well under the ~1 MB card limit.
+- The explorer runs its own JS inside the frame (no CDN, no fetch); it relies on the same `postMessage`
+  bridge as the chips for "Explain this view".
 - First run should be with F12 open to confirm chips inside the frame reach the agent (proven for ELI5).
 
 ![Heatmap with anomalies](docs/heatmap.png)

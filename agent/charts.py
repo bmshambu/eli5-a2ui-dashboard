@@ -10,6 +10,7 @@ the accessible and exact view.
 import html
 import math
 
+from . import explorer
 from .analysis import num, pct
 
 W, H = 760, 340
@@ -226,12 +227,11 @@ def heatmap(c: dict, measure: str, dim: str) -> str:
             step = int(round((v - lo) / ((hi - lo) or 1) * (len(RAMP) - 1)))
             dev = flags.get((i, j))
             tip = f"{name} · {c['cols'][j]}: {num(v)}" + (f" · {pct(dev)} vs expected" if dev is not None else "")
-            ink = "#ffffff" if step >= 7 else "#0b0b0b"
             cls = ' class="flag up"' if dev is not None and dev > 0 else ' class="flag down"' if dev is not None else ""
-            cells.append(f'<td{cls} style="background:{RAMP[step]};color:{ink}" data-tip="{_e(tip)}">{_e(num(v)) if show_text else ""}</td>')
+            cells.append(f'<td{cls} style="background:var(--r{step});color:var(--ri{step})" data-tip="{_e(tip)}">{_e(num(v)) if show_text else ""}</td>')
         total = sum(v for v in c["values"][i] if v is not None)
         rows.append(f'<tr><th class="rowh">{_e(name)}</th>{"".join(cells)}<td class="tot">{_e(num(total))}</td></tr>')
-    scale = "".join(f'<i style="background:{col}"></i>' for col in RAMP)
+    scale = "".join(f'<i style="background:var(--r{k})"></i>' for k in range(len(RAMP)))
     legend = (f'<div class="legend"><span class="ramp">{_e(num(lo))} {scale} {_e(num(hi))}</span>'
               f'<span><i class="sw flagsw"></i>Far from expected (marked ▲ high, ▼ low)</span></div>')
     return (legend + f'<div class="hmwrap"><table class="heat{"" if show_text else " dense"}"><thead><tr><th class="rowh">{_e(dim)}</th>{head}<th class="tot">Total</th></tr></thead>'
@@ -329,6 +329,8 @@ def distribution(c: dict, measure: str) -> str:
 def draw(a) -> str:
     c = a.chart
     t = c["type"]
+    if t == "explore":
+        return explorer.render(a)
     if t == "trend":
         return trend(c, a.measure)
     if t == "pareto":
