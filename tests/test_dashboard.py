@@ -351,3 +351,12 @@ def test_explain_this_view_reanalyses_the_filtered_rows(fake):
     assert json.loads(comps["pdf"]["action"]["event"]["context"]["filters"]) == f  # buttons carry filters as JSON
     files = [p for e in turns[2] for p in e.content.parts if p.inline_data and p.inline_data.mime_type == "application/pdf"]
     assert len(files) == 1 and files[0].inline_data.data.startswith(b"%PDF")
+
+
+@pytest.mark.parametrize("style", ["explore", "heatmap", "trend"])
+def test_every_view_has_a_theme_switch_and_themed_heatmap_colours(tabs, style):
+    a = analysis.analyze(_tab(tabs, "Monthly Sales"), style)
+    html_ = page.page(a, llm.fallback(a), BOOK.name)
+    assert all(f'data-t="{t}"' in html_ for t in ("auto", "light", "dark"))
+    assert ":root[data-theme=dark]" in html_ and ":root:not([data-theme=light])" in html_
+    assert not re.search(r'style="background:#', html_)  # cell colours come from the theme, not fixed hex

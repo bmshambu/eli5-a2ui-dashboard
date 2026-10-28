@@ -26,6 +26,10 @@ filtered in the browser with no round trip to the agent:
 - **Explain this view**: sends the current filters back to the agent, which re-runs the full analysis on
   just those rows and writes the story for them. The PDF button then exports that filtered view.
 
+Every view (explorer and the 7 chart styles) follows the device's light or dark setting by default, and an
+Auto / Light / Dark switch at the top lets the viewer override it, since GE's own theme can differ from the
+device's. Heatmap colours flip with the theme so low values stay close to the background.
+
 The page carries a pre-aggregated cube (at most 6,000 rows by category, period and up to 6 numbers), so it
 stays well under GE's 800 KB message limit on large sheets.
 

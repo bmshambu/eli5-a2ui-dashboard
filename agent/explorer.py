@@ -289,10 +289,10 @@ function renderHeat(){var box=$('ex-hm');
     cols.forEach(function(c){var a=cell.get(rk+'|'+c),v=a?val(a,'m:'+m+':total'):null;
       if(v==null){h+='<td class="c e"></td>';return;}
       var st=Math.round((v-lo)/((hi-lo)||1)*(RAMP.length-1)),on=s&&s.src==='heat'&&s.val===rk&&s.col===c,dim=s&&s.src==='heat'&&!on&&!(s.col==null&&s.val===rk);
-      h+='<td class="c'+(on?' on':'')+(dim?' dim':'')+'" data-r="'+rk+'" data-c="'+c+'" style="background:'+RAMP[st]+';color:'+(st>=7?'#fff':'#0b0b0b')+'" data-tip="'+esc(dv(rd,rk)+' · '+(isT?T.labels[c]:dv(+cd,c))+': '+num(v))+'">'+(cols.length<=12?esc(num(v)):'')+'</td>';});
+      h+='<td class="c'+(on?' on':'')+(dim?' dim':'')+'" data-r="'+rk+'" data-c="'+c+'" style="background:var(--r'+st+');color:var(--ri'+st+')" data-tip="'+esc(dv(rd,rk)+' · '+(isT?T.labels[c]:dv(+cd,c))+': '+num(v))+'">'+(cols.length<=12?esc(num(v)):'')+'</td>';});
     h+='<td class="tot">'+esc(num(val(rt.get(rk),'m:'+m+':total')))+'</td></tr>';});
   box.innerHTML=h+'</tbody></table>';
-  $('ex-hlegend').innerHTML='<span class="ramp">'+esc(num(lo))+' '+RAMP.map(function(c){return '<i style="background:'+c+'"></i>';}).join('')+' '+esc(num(hi))+'</span><span>Click a cell or a row name to filter the other visuals.</span>';
+  $('ex-hlegend').innerHTML='<span class="ramp">'+esc(num(lo))+' '+RAMP.map(function(c,k){return '<i style="background:var(--r'+k+')"></i>';}).join('')+' '+esc(num(hi))+'</span><span>Click a cell or a row name to filter the other visuals.</span>';
   box.querySelectorAll('td.c[data-c]').forEach(function(td){td.onclick=function(){select('heat',rd,+td.dataset.r,+td.dataset.c,isT?'time':String(+cd));};});
   box.querySelectorAll('td.rh').forEach(function(td){td.onclick=function(){select('heat',rd,+td.dataset.r,null,null);};});}
 // ── table ──
