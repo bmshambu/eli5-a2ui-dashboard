@@ -82,6 +82,7 @@ class Analysis:
     dft: object = None  # the rows the time-based views use (a partial last period left out)
     filters: dict | None = None  # {"dims": {column: [values]}, "from": iso date, "to": iso date}
     base: object = None  # all rows, unfiltered (the explorer's slicers can widen the view again)
+    view: str = "bubble"  # the explorer's first view: bubble, tree, heat or table
 
     def fact_lines(self) -> str:
         return "\n".join(f"{f.id} [{f.kind}] {f.text}" for f in self.facts)
@@ -219,13 +220,14 @@ def analyze(sheet: Sheet, style: str = "auto", measure: str | None = None, dim: 
     df, used, described = apply_filters(sheet.df, p, filters)
     measure = measure if measure in p.measures else p.measures[0]
     dim = dim if dim in p.dimensions else (p.dimensions[0] if p.dimensions else None)
+    style = sheet.style if style == "auto" else style
     drawn = resolve(style, p)
     agg = "mean" if is_rate(measure) else "sum"
     a = Analysis(sheet=sheet.name, style=drawn, asked=style, measure=measure, dim=dim, time=p.time, agg=agg, prof=p,
                  notes=list(sheet.notes))
     if style not in ("auto", drawn) and style in STYLES:
         a.notes.append(f"{STYLES[style][0]} needs {_needs(style)}, which this tab doesn't have, so I drew {STYLES[drawn][0]} instead.")
-    a.filters, a.base = used, sheet.df
+    a.filters, a.base, a.view = used, sheet.df, sheet.view
     f = _Facts()
     if described:
         f.add("summary", f"This view is filtered to {described} ({len(df):,} of {len(sheet.df):,} rows).", 0.4)
@@ -759,7 +761,7 @@ def _explore(a: Analysis, df, p: Profile, f: _Facts) -> None:
         init["from"] = next((i for i, t in enumerate(iso) if lo and t >= lo), None) if lo else None
         init["to"] = max((i for i, t in enumerate(iso) if hi and t <= hi), default=None) if hi else None
     a.chart.update({"type": "explore", "cube": c, "init": init,
-                    "defaults": {"detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0,
+                    "defaults": {"view": a.view, "detail": detail, "color": color, "x": x, "y": y, "size": sz, "hmRow": hm_row, "hmCol": hm_col, "hmM": m0,
                                  **_treemap_defaults(dims, ms, plain, ident, m0, bool(p.time))}})
     _quadrant_fact(f, a, df, p)
     if a.dim:

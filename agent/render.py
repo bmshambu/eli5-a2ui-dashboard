@@ -64,7 +64,9 @@ def welcome_card() -> list[dict]:
     extra = [c for n, icon, t, d in steps for c in _step(n, icon, t, d)]
     children = [_text("title", "Turn a spreadsheet into charts with insights", "h4"), *[c for c in extra if c["id"] in ("step1", "step2", "step3")],
                 {"id": "div", "component": "MaterialDivider"},
-                _text("eg", "Or just ask, for example *\"show revenue by region as a heatmap\"*.", "caption")]
+                _text("eg", "Or just ask, for example *\"show revenue by region as a heatmap\"*.", "caption"),
+                _text("link", "**No file? Paste a link to a company filing on sec.gov** (an earnings release or a 10-Q) and I'll "
+                              "build the dashboard from its tables, with five years of quarterly history.", "caption")]
     comps = [
         {"id": "root", "component": "MaterialCard", "children": ["col"]},
         {"id": "col", "component": "MaterialColumn", "align": "stretch", "children": [c["id"] for c in children]},
@@ -80,9 +82,9 @@ def _review_button(hint: str | None = None) -> list[dict]:
     return out
 
 
-def tabs_card(file: str, tabs: list[tuple[str, Profile]], hint: str | None = None) -> list[dict]:
-    """One button per tab, with what was found in it."""
-    children = [_text("title", f"Which tab of {file}?", "h4"), *_review_button(hint)]
+def tabs_card(file: str, tabs: list[tuple[str, Profile]], hint: str | None = None, review: bool = True) -> list[dict]:
+    """One button per tab, with what was found in it. No Review button for a filing link (`review`)."""
+    children = [_text("title", f"Which tab of {file}?", "h4"), *(_review_button(hint) if review else [_text("reviewd", hint, "caption")] if hint else [])]
     for i, (name, prof) in enumerate(tabs):
         children.append(_button(f"tab{i}", f"{name} · {prof.rows:,} rows", TAB_ACTION,
                                 {"sheet": name, "prompt": f"Use the {name} tab"}, "table_chart"))
@@ -90,7 +92,7 @@ def tabs_card(file: str, tabs: list[tuple[str, Profile]], hint: str | None = Non
     return _card("dash-tabs", children)
 
 
-def styles_card(file: str, sheet: str, prof: Profile, notes: list[str] = (), hint: str | None = None) -> list[dict]:
+def styles_card(file: str, sheet: str, prof: Profile, notes: list[str] = (), hint: str | None = None, review: bool = True) -> list[dict]:
     """The chart styles this tab can support, best first."""
     ok = available(prof)
     children = [_text("title", f"How should I chart {sheet}?", "h4"),
@@ -104,7 +106,8 @@ def styles_card(file: str, sheet: str, prof: Profile, notes: list[str] = (), hin
                                 "prompt": f"Show {sheet} as {label.lower()}"}, icon, "flat" if s == "auto" else "stroked"))
         children.append(_text(f"std-{s}", what, "caption"))
     children.append(_button("other", "Pick another tab", TABS_ACTION, {"prompt": "Show me the other tabs"}, "tab"))
-    children += _review_button(hint)
+    if review:
+        children += _review_button(hint)
     return _card("dash-styles", children)
 
 

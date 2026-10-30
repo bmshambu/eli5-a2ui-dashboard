@@ -1,6 +1,6 @@
 """Spreadsheet insights agent for Gemini Enterprise.
 
-The flow: the user uploads an .xlsx or .csv (GE sends an .xlsx as one CSV per tab; they are read
+The flow: the user uploads an .xlsx or .csv (or pastes a link to an SEC filing: see filings.py) (GE sends an .xlsx as one CSV per tab; they are read
 together, and lookup tabs are joined onto the tab that points at them), and the side panel opens
 straight on the dashboard of the main tab: filters, KPIs, bubble/treemap/heatmap/table views, a
 "What this shows" panel and the AI summary beside them. "Other charts", "Chart styles" and "Pick
@@ -27,7 +27,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 from google.genai import types as genai_types
 
-from . import a2ui, analysis, llm, pdf, render, review, sheets, validate
+from . import a2ui, analysis, filings, llm, pdf, render, review, sheets, validate
 from .analysis import STYLES
 from .schema import Narrative
 
@@ -70,8 +70,22 @@ def workbook(up: sheets.Upload) -> list[sheets.Sheet]:
     if key not in _books:
         if len(_books) >= 4:
             _books.pop(next(iter(_books)))
-        _books[key] = sheets.read(up)
+        _books[key] = filings.read(up) if filings.is_link(up) else sheets.read(up)
     return _books[key]
+
+
+def latest(events) -> sheets.Upload | None:
+    """The most recent source in the session: a spreadsheet upload or a pasted filing link."""
+    for event in reversed(events or []):
+        if getattr(event, "author", None) == "user":
+            content = getattr(event, "content", None)
+            ups = sheets.uploads_in(content)
+            if ups:
+                return sheets.bundle(ups)
+            link = filings.upload_in(content)
+            if link:
+                return link
+    return None
 
 
 def _user_text(content) -> str:
@@ -146,21 +160,21 @@ def review_reply(up: sheets.Upload) -> Reply:
 
 
 def main_tab(tabs: list[sheets.Sheet]) -> sheets.Sheet:
-    """The tab to open first: the one other tabs were joined onto (Orders), else one that can be a
-    dashboard, else the biggest."""
-    return max(tabs, key=lambda t: (len(t.joined), analysis.available(sheets.profile(t))["explore"], len(t.df)))
+    """The tab to open first: a filing's revenue table, the one other tabs were joined onto (Orders),
+    else one that can be a dashboard, else the biggest."""
+    return max(tabs, key=lambda t: (t.lead, len(t.joined), analysis.available(sheets.profile(t))["explore"], len(t.df)))
 
 
 def tabs_reply(up: sheets.Upload, tabs: list[sheets.Sheet], hint: str | None = None) -> Reply:
     if len(tabs) == 1:
         return styles_reply(up, tabs[0], hint)
     return Reply(f"**{up.name}** has {len(tabs)} tabs with numbers. Which one should I chart?",
-                 render.tabs_card(up.name, [(t.name, sheets.profile(t)) for t in tabs], hint))
+                 render.tabs_card(up.name, [(t.name, sheets.profile(t)) for t in tabs], hint, review=not filings.is_link(up)))
 
 
 def styles_reply(up: sheets.Upload, sheet: sheets.Sheet, hint: str | None = None) -> Reply:
     return Reply(f"Pick a chart style for the **{sheet.name}** tab, or tell me what you want to see.",
-                 render.styles_card(up.name, sheet.name, sheets.profile(sheet), sheet.notes, hint))
+                 render.styles_card(up.name, sheet.name, sheets.profile(sheet), sheet.notes, hint, review=not filings.is_link(up)))
 
 
 async def chart(up: sheets.Upload, sheet: sheets.Sheet, style: str = "auto", measure: str | None = None,
@@ -235,17 +249,29 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
     ctx = (action or {}).get("context") or {}
     text = _user_text(content) if action is None else str(ctx.get("prompt") or "") if name == render.ASK_ACTION else ""
     if up is None:
-        return Reply("Upload an Excel or CSV file and I'll chart it with insights.", render.welcome_card())
-    if name == render.REVIEW_ACTION or (action is None and _REVIEW.search(text)):
+        return Reply("Upload an Excel or CSV file, or paste a link to a company filing on sec.gov, and I'll chart it "
+                     "with insights.", render.welcome_card())
+    link = filings.is_link(up)
+    text = filings.without_link(text) if link else text
+    if not link and (name == render.REVIEW_ACTION or (action is None and _REVIEW.search(text))):
         return review_reply(up)
     try:
         tabs = workbook(up)
     except ValueError as exc:
+        if link:
+            log.warning("filing link failed: %s: %s", filings.url_of(up), exc)
+            return Reply(f"Sorry, {exc}.", render.error_card(f"Sorry, {exc}."))
         return Reply(f"Sorry, {exc}.", render.error_card(f"Sorry, {exc}.", review_file="couldn't open" not in str(exc)
                                                          and "aren't supported" not in str(exc)))
     except Exception:  # noqa: BLE001
         log.exception("could not read %s", up.name)
+        if link:
+            return Reply("Sorry, I couldn't read that filing.", render.error_card(f"I couldn't read the tables in **{up.name}**."))
         return Reply("Sorry, I couldn't read that file.", render.error_card(f"I couldn't read **{up.name}**. Is it a normal .xlsx or .csv file?"))
+    if link:
+        up = up._replace(name=filings.title(up))
+        if name == render.REVIEW_ACTION:
+            return tabs_reply(up, tabs, "The file check is for uploaded spreadsheets. These tabs come straight from the filing.")
 
     if name == render.PDF_ACTION:
         return pdf_reply(up, tabs, ctx, last)
@@ -267,7 +293,7 @@ async def respond(content, up: sheets.Upload | None, fresh: bool = False, last: 
     base = ctx if name == render.ASK_ACTION else (None if fresh else last)
     if base and base.get("file", up.name) != up.name:
         base = None
-    hint = review_hint(up) if fresh else None
+    hint = (filings.summary(tabs) if link else review_hint(up)) if fresh else None
     if _TABS.search(text):
         return tabs_reply(up, tabs, hint)
     if not text or _GREETING.match(text):  # a new file opens straight on the dashboard
@@ -295,13 +321,14 @@ class SheetInsightsAgent(BaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         log.info("turn parts: %s", sheets.describe(ctx.user_content))
         uploaded = sheets.uploads_in(ctx.user_content)
-        up = sheets.bundle(uploaded) if uploaded else sheets.latest(ctx.session.events)
+        linked = None if uploaded else filings.upload_in(ctx.user_content)  # a pasted filing link
+        up = sheets.bundle(uploaded) if uploaded else linked or latest(ctx.session.events)
         other_files = [p for p in getattr(ctx.user_content, "parts", None) or []
                        if getattr(p, "inline_data", None) and not (p.inline_data.data or b"").startswith(a2ui.TAG_START)]
         if other_files and not uploaded:
             reply = Reply("I can chart Excel (.xlsx) and CSV files. Please upload one of those.", render.welcome_card())
         else:
-            reply = await respond(ctx.user_content, up, bool(uploaded), ctx.session.state.get(STATE_KEY))
+            reply = await respond(ctx.user_content, up, bool(uploaded or linked), ctx.session.state.get(STATE_KEY))
         validate.check(reply.messages)
         parts = [genai_types.Part(text=reply.text), *reply.files] + [a2ui.to_genai_part(m) for m in reply.messages]
         yield Event(
@@ -316,5 +343,6 @@ class SheetInsightsAgent(BaseAgent):
 if os.getenv("AGENT_MODE") == "probe":
     from .probe_agent import probe_agent as root_agent
 else:
-    root_agent = SheetInsightsAgent(name="sheet_insights", description="Turns an uploaded spreadsheet tab into a chart plus insight "
-                                                                       "analysis: trends, forecast, drivers, anomalies and next steps.")
+    root_agent = SheetInsightsAgent(name="sheet_insights", description="Turns an uploaded spreadsheet tab, or the tables of an SEC "
+                                                                       "filing link, into a chart plus insight analysis: trends, "
+                                                                       "forecast, drivers, anomalies and next steps.")
