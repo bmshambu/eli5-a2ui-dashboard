@@ -25,6 +25,8 @@ agent_env_vars: dict = {
     "MODEL_LOCATION": os.getenv("MODEL_LOCATION", "global"),
     "THINKING_LEVEL": os.getenv("THINKING_LEVEL", "low"),
 }
+if os.getenv("SEC_USER_AGENT"):  # filing links: SEC wants "App name contact@email" on every request
+    agent_env_vars["SEC_USER_AGENT"] = os.environ["SEC_USER_AGENT"]
 
 # Inject local env vars that start with AGENT_VAR_ (optional convention)
 for key, value in os.environ.items():
@@ -76,6 +78,8 @@ agent_requirements = [
     "pandas>=2.2,<4",
     "numpy>=1.26",
     "openpyxl>=3.1",
+    "lxml>=5.0",
+    "requests>=2.31",
 ]
 
 if agent:

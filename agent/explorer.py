@@ -116,7 +116,7 @@ var SERIES=['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#6250d6
 var RAMP=['#e8f1fd','#cde2fb','#b7d3f6','#9ec5f4','#86b6ef','#6da7ec','#5598e7','#3987e5','#2a78d6','#256abf','#1c5cab','#104281'];
 var QCOL=['var(--q1)','var(--q2)','var(--q3)','var(--q4)'];
 var DF=D.defaults;
-var S={dimSel:C.dims.map(function(d){return null;}),from:0,to:T?T.labels.length-1:0,sel:null,view:'bubble',
+var S={dimSel:C.dims.map(function(d){return null;}),from:0,to:T?T.labels.length-1:0,sel:null,view:DF.view||'bubble',
   detail:DF.detail,color:DF.color,x:DF.x,y:DF.y,size:DF.size,hmRow:DF.hmRow,hmCol:DF.hmCol,hmM:DF.hmM,sortKey:'y',sortDir:-1,
   tmGroup:DF.tmGroup,tmCell:DF.tmCell,tmSize:DF.tmSize,tmColor:DF.tmColor,zoom:null,page:0,hover:null};
 // colour by quadrant verdict unless the bubbles are rows coloured by their segment

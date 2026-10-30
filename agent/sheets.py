@@ -121,6 +121,9 @@ class Sheet:
     notes: list[str] = field(default_factory=list)  # what tidying did, shown as data notes
     wide: bool = False  # melted from one-column-per-period
     joined: list[str] = field(default_factory=list)  # lookup tabs joined on (see link)
+    lead: bool = False  # the tab to open first (a filing's revenue table)
+    view: str = "bubble"  # the explorer's first view (a filing's line items read best as a treemap)
+    style: str = "auto"  # what "auto" draws first (a filing's History opens on trend + forecast)
 
 
 def read(upload: Upload) -> list[Sheet]:

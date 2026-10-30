@@ -71,6 +71,33 @@ the views it can show now and what to add to unlock more (a date column, a text 
 
 ![File check](docs/file-check.png)
 
+## Dashboards from a filing link
+
+No file needed: paste a link to a company filing on sec.gov, such as an earnings release (8-K Exhibit 99.1,
+e.g. [Alphabet Q3 2026](https://www.sec.gov/Archives/edgar/data/1652044/000165204426000080/googexhibit991q32026.htm)),
+a 10-Q or a 10-K, and the same dashboard opens (`agent/filings.py`):
+
+- Every financial table on the page becomes a tab: one row per line item, one column per period
+  ("Quarter Ended September 30," over "2025 2026" becomes **Q3 2025** and **Q3 2026**), plus **Change** and
+  **Change %**. `$` and `%` in their own cells, `(123)` negatives, `—` and footnote marks are handled.
+- Subtotals (Google advertising, Total revenues, Net income) are left out so treemaps and totals don't count
+  twice; the subtotal an item rolls into becomes its **Group**. Per-share rows, share counts and headcount are
+  left out of the money tables. Year-to-date columns are dropped when quarter columns exist. A table whose items
+  repeat under two grand totals (segment revenues, then segment operating income) becomes two tabs.
+- The revenue table opens first, on the treemap: blocks by Group, sized by the latest quarter, coloured by
+  change %.
+- A **History** tab adds up to five years of quarters from SEC's XBRL feed (`data.sec.gov` companyfacts for the
+  CIK in the link): revenue, operating income, net income, operating cash flow, capex, free cash flow, margins and
+  diluted EPS. Q4 and cash-flow quarters are worked out from year-to-date totals. A quarter the feed doesn't have
+  yet (the release comes out before the 10-Q) is taken from the release itself. It opens on trend + forecast.
+- Later turns reuse the link like an upload ("use the Consolidated Statements Of Income tab", "History as a trend").
+  Only sec.gov links are fetched. SEC wants a User-Agent naming the app and a contact email: set
+  `SEC_USER_AGENT` (see Deploy).
+
+![Filing link: revenue treemap](docs/filing-treemap.png)
+
+![Filing link: History tab, trend and forecast](docs/filing-history.png)
+
 ## What it does that Excel doesn't
 
 Excel draws the numbers you select. This agent reads the whole tab and works out what matters:
@@ -140,10 +167,12 @@ Typed shortcuts work at any point: *"show revenue by product as a heatmap"*, *"u
 | `agent/page.py` | the self-contained dashboard page (Canvas + IFrameSrcdoc) |
 | `agent/llm.py`, `agent/schema.py` | the narrative call, number grounding, facts-only fallback |
 | `agent/render.py` | A2UI cards: welcome, tab picker, style picker, dashboard, error |
+| `agent/filings.py` | filing links: fetch from sec.gov, release tables to tabs, the History tab from companyfacts |
 | `agent/review.py` | the upfront file check: findings per tab with cell references and fixes, and its page |
 | `agent/pdf.py` | the PDF report (reportlab) |
 | `agent/a2ui.py`, `agent/validate.py`, `agent/schemas/` | from the boilerplate: v0.9 helpers and offline validation against the GE catalog |
 | `agent/probe*.py`, `PROBE.md` | from the boilerplate: `AGENT_MODE=probe` tenant probe |
+| `tests/fixtures/` | Alphabet's Q3 2026 release and its companyfacts (trimmed) for the filing tests (no live calls) |
 | `samples/sample_workbook.xlsx` | three tabs that exercise every style (`python tools/make_sample.py` rebuilds it) |
 
 ## Run the tests
@@ -162,8 +191,11 @@ composite catalog (`validate.check`).
 1. `copy env.dev.example .env.dev` and fill in the project, region and staging bucket. Keep the distinct
    `AGENT_DISPLAY_NAME`: deploy matches on it, so reusing ELI5's would overwrite that agent.
 2. `gcloud auth application-default login`
-3. `python deploy_to_agent_engine.py`
-4. GE Admin console, Agents, Add agent, Vertex AI Agent Engine, paste the `projects/.../reasoningEngines/...` name.
+3. For filing links, set `SEC_USER_AGENT` in `.env.dev` (e.g. `Sheet Insights you@company.com`); the deploy
+   passes it to the agent. Agent Engine needs internet egress to `www.sec.gov` and `data.sec.gov` (VPC Service
+   Controls or a no-egress network will block it; the agent then says so, and logs `sec fetch ... -> status`).
+4. `python deploy_to_agent_engine.py`
+5. GE Admin console, Agents, Add agent, Vertex AI Agent Engine, paste the `projects/.../reasoningEngines/...` name.
 
 Judge rendering only in GE chat: the Agent Engine Playground and `adk web` show raw JSON. Pins in
 `requirements.txt` and `deploy_to_agent_engine.py` must match (see the boilerplate notes).
@@ -176,6 +208,7 @@ Judge rendering only in GE chat: the Agent Engine Playground and `adk web` show 
 - The dashboard is about 25 to 70 KB per page, well under the ~1 MB card limit.
 - The explorer runs its own JS inside the frame (no CDN, no fetch); it relies on the same `postMessage`
   bridge as the chips for "Explain this view".
+- Whether Agent Engine in the target project can reach sec.gov (filing links). Look for `sec fetch` in the logs.
 - First run should be with F12 open to confirm chips inside the frame reach the agent (proven for ELI5).
 
 ![Heatmap with anomalies](docs/heatmap.png)
