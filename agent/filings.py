@@ -38,6 +38,8 @@ FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 TIMEOUT = 25
 MAX_BYTES = 25_000_000
 MAX_TABS = 20
+RETRIES = 2  # on 429/503 (waits 2 s then 4 s, so a turn stays short)
+MAX_WAIT = 10.0  # seconds, per retry
 QUARTERS = 20  # five years of history
 
 _URL = re.compile(r"https?://[^\s<>\"'\])]+", re.I)
@@ -139,16 +141,25 @@ def fetch(url: str) -> bytes:
     if urlparse(url).scheme not in ("http", "https") or host not in HOSTS:
         raise ValueError("I can only read company filings from sec.gov links for now, for example an earnings "
                          "release (8-K Exhibit 99.1) or a 10-Q on www.sec.gov")
-    _throttle.wait()
-    try:
-        r = requests.get(url, headers={"User-Agent": user_agent(), "Accept-Encoding": "gzip, deflate"},
-                         timeout=TIMEOUT, stream=True)
-        data = r.raw.read(MAX_BYTES + 1, decode_content=True)
-    except (requests.ConnectionError, requests.Timeout) as exc:
-        log.warning("sec fetch failed for %s: %s", url, exc)
-        raise ValueError("I couldn't reach sec.gov from here. If I'm running in Agent Engine, its Google Cloud "
-                         "project needs internet access to www.sec.gov and data.sec.gov") from exc
-    log.info("sec fetch %s -> %s (%d bytes)", url, r.status_code, len(data))
+    for attempt in range(RETRIES + 1):
+        _throttle.wait()
+        try:
+            r = requests.get(url, headers={"User-Agent": user_agent(), "Accept-Encoding": "gzip, deflate"},
+                             timeout=TIMEOUT, stream=True)
+            data = r.raw.read(MAX_BYTES + 1, decode_content=True)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            log.warning("sec fetch failed for %s: %s", url, exc)
+            raise ValueError("I couldn't reach sec.gov from here. If I'm running in Agent Engine, its Google Cloud "
+                             "project needs internet access to www.sec.gov and data.sec.gov") from exc
+        log.info("sec fetch %s -> %s (%d bytes, attempt %d)", url, r.status_code, len(data), attempt + 1)
+        if r.status_code not in (429, 503) or attempt == RETRIES:
+            break
+        time.sleep(_backoff(r, attempt))  # SEC's rate limit: back off and try again
+    if r.status_code == 429:
+        log.warning("sec.gov rate limit (429) for %s; User-Agent %r; %s", url, user_agent(), _page_title(data))
+        raise ValueError("sec.gov is limiting requests from the server I run on (429). SEC pauses an address for about "
+                         "10 minutes after too many requests, and cloud servers often share addresses with other users. "
+                         "Try the link again in 10 minutes")
     if r.status_code == 403:
         raise ValueError("sec.gov turned the request down (403). SEC wants a User-Agent naming the app and a contact "
                          "email: set SEC_USER_AGENT, for example \"Sheet Insights you@company.com\"")
@@ -159,6 +170,20 @@ def fetch(url: str) -> bytes:
     if len(data) > MAX_BYTES:
         raise ValueError("that page is too big for me to read")
     return data
+
+
+def _backoff(r, attempt: int) -> float:
+    """Seconds to wait before retrying: SEC's Retry-After when it sends one, else 2, 4, 8 (capped)."""
+    try:
+        wait = float(r.headers.get("Retry-After", ""))
+    except ValueError:
+        wait = 2.0 * 2 ** attempt
+    return min(max(wait, 1.0), MAX_WAIT)
+
+
+def _page_title(data: bytes) -> str:
+    m = re.search(rb"<title>(.*?)</title>", data[:5000], re.I | re.S)
+    return m.group(1).decode("utf-8", "replace").strip() if m else ""
 
 
 def companyfacts(cik: int) -> dict:

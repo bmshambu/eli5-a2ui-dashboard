@@ -186,3 +186,20 @@ def test_bad_link_gets_a_plain_error(fake, sec):
     msgs = _messages(turns[0])
     validate.check(msgs)
     assert "404" in turns[0][0].content.parts[0].text and "review" not in _components(msgs)
+
+
+class _Resp:
+    def __init__(self, status, body=b"ok", headers=None):
+        self.status_code, self.headers = status, headers or {}
+        self.raw = type("Raw", (), {"read": lambda _self, n, decode_content=True: body})()
+
+
+def test_rate_limit_is_retried_then_explained(monkeypatch):
+    waits, answers = [], [_Resp(429, headers={"Retry-After": "1"}), _Resp(429), _Resp(200, PAGE)]
+    monkeypatch.setattr(filings.requests, "get", lambda *a, **k: answers.pop(0))
+    monkeypatch.setattr(filings.time, "sleep", waits.append)
+    monkeypatch.setattr(filings._throttle, "gap", 0)
+    assert filings.fetch(URL) == PAGE and waits == [1.0, 4.0]  # SEC's Retry-After, then 2 s doubled
+    monkeypatch.setattr(filings.requests, "get", lambda *a, **k: _Resp(429, b"<title>Request Rate Threshold Exceeded</title>"))
+    with pytest.raises(ValueError, match=r"limiting requests.*\(429\).*10 minutes"):
+        filings.fetch(URL)
