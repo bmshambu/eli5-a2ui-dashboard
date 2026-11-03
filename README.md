@@ -209,6 +209,10 @@ Judge rendering only in GE chat: the Agent Engine Playground and `adk web` show 
 - The explorer runs its own JS inside the frame (no CDN, no fetch); it relies on the same `postMessage`
   bridge as the chips for "Explain this view".
 - Whether Agent Engine in the target project can reach sec.gov (filing links). Look for `sec fetch` in the logs.
+  A `429` means SEC's rate limit: the agent retries twice, then asks the user to try again in 10 minutes.
+  SEC pauses an IP address for about 10 minutes, and Agent Engine's default egress shares Google Cloud
+  addresses with other tenants. If 429s keep coming, give the project its own outbound IP (VPC egress through
+  Cloud NAT with a static address) and set `SEC_USER_AGENT`.
 - First run should be with F12 open to confirm chips inside the frame reach the agent (proven for ELI5).
 
 ![Heatmap with anomalies](docs/heatmap.png)
